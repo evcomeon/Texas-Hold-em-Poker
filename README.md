@@ -39,13 +39,11 @@ A full-stack Texas Hold'em poker game with complete frontend-backend separation.
 
 ## Browser Test Results
 
-````carousel
-![Start screen with premium dark theme and gold accents](/Users/evmbp/.gemini/antigravity/brain/aaa74ebd-51fd-404f-8962-251592176e5f/start_screen_actual_1773325084263.png)
-<!-- slide -->
-![Showdown: community cards displayed, hands evaluated, Charlie wins with Two Pair](/Users/evmbp/.gemini/antigravity/brain/aaa74ebd-51fd-404f-8962-251592176e5f/showdown_result_1773325206693.png)
-<!-- slide -->
-![Second hand: all AI folded, player wins pot of 30 chips](/Users/evmbp/.gemini/antigravity/brain/aaa74ebd-51fd-404f-8962-251592176e5f/hand_2_result_1773325227308.png)
-````
+![Start screen with premium dark theme and gold accents](assets/start_screen.png)
+
+![Showdown: community cards displayed, hands evaluated, Charlie wins with Two Pair](assets/showdown_result.png)
+
+![Second hand: all AI folded, player wins pot of 30 chips](assets/hand_2_result.png)
 
 ## How to Run
 
