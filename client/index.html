@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="德州扑克 - 在线游戏" />
+  <title>🃏 德州扑克</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <h1>🃏 德州扑克</h1>
+      <div class="header-info">
+        <span id="hand-number">第 0 手</span>
+        <span id="phase-badge" class="badge">等待中</span>
+      </div>
+    </header>
+
+    <!-- Start Screen -->
+    <div id="start-screen" class="start-screen">
+      <div class="start-card">
+        <div class="start-icon">🃏</div>
+        <h2>德州扑克</h2>
+        <p>Texas Hold'em Poker</p>
+        <div class="start-input-group">
+          <label for="player-name">你的名字</label>
+          <input type="text" id="player-name" placeholder="玩家" maxlength="10" />
+        </div>
+        <button id="btn-start" class="btn btn-primary btn-lg">开始游戏</button>
+      </div>
+    </div>
+
+    <!-- Game Area -->
+    <div id="game-area" class="game-area hidden">
+      <!-- Poker Table -->
+      <div class="table-container">
+        <div class="poker-table">
+          <!-- Opponent Seats -->
+          <div class="seats">
+            <div class="seat seat-top-left" id="seat-1"></div>
+            <div class="seat seat-top" id="seat-2"></div>
+            <div class="seat seat-top-right" id="seat-3"></div>
+          </div>
+
+          <!-- Community Cards -->
+          <div class="community-area">
+            <div class="community-cards" id="community-cards"></div>
+            <div class="pot-display">
+              <span class="pot-label">底池</span>
+              <span class="pot-amount" id="pot-amount">0</span>
+            </div>
+          </div>
+
+          <!-- Player Seat -->
+          <div class="player-area">
+            <div class="seat seat-bottom" id="seat-0"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Action Bar -->
+      <div class="action-bar" id="action-bar">
+        <div class="action-buttons" id="action-buttons"></div>
+        <div class="raise-controls hidden" id="raise-controls">
+          <input type="range" id="raise-slider" min="0" max="1000" step="10" />
+          <div class="raise-display">
+            <span id="raise-value">0</span>
+            <button id="btn-confirm-raise" class="btn btn-accent">确认加注</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Last Action Notification -->
+      <div class="notification hidden" id="notification"></div>
+    </div>
+
+    <!-- History Panel -->
+    <div class="history-toggle" id="history-toggle">📋</div>
+    <div class="history-panel hidden" id="history-panel">
+      <div class="history-header">
+        <h3>对局记录</h3>
+        <button class="btn-close" id="history-close">✕</button>
+      </div>
+      <div class="history-list" id="history-list"></div>
+    </div>
+
+    <!-- Game Log -->
+    <div class="game-log" id="game-log"></div>
+  </div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
