@@ -1,14 +1,11 @@
 // ============================================================
-// Texas Hold'em Poker - Game Engine
+// Texas Hold'em Poker - Multiplayer Game Engine
 // ============================================================
-// Core state machine: manages players, betting rounds, pot, and settlement
 
 const { createDeck, shuffle, cardToString } = require('./deck');
-const { evaluateBest, compareHands, handStrength } = require('./evaluator');
+const { evaluateBest, compareHands } = require('./evaluator');
 
 const PHASES = ['WAITING', 'PRE_FLOP', 'FLOP', 'TURN', 'RIVER', 'SHOWDOWN', 'FINISHED'];
-
-const AI_NAMES = ['Alice', 'Bob', 'Charlie'];
 
 class GameEngine {
   constructor() {
@@ -29,22 +26,35 @@ class GameEngine {
     this.currentHandLog = [];
     this.lastAction = null;
     this.roundInitiator = -1;
+    this.readyForNext = new Set(); // Track who has requested next hand
+  }
+
+  _log(msg) {
+    const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    this.currentHandLog.push(`[${time}] ${msg}`);
   }
 
   // ── Initialization ──────────────────────────────────────────
 
-  createGame(playerName = '玩家') {
-    this.players = [
-      { id: 0, name: playerName, chips: 1000, holeCards: [], bet: 0, totalBet: 0, folded: false, allIn: false, isAI: false, isDealer: false, isActive: true },
-      ...AI_NAMES.map((name, i) => ({
-        id: i + 1, name, chips: 1000, holeCards: [], bet: 0, totalBet: 0, folded: false, allIn: false, isAI: true, isDealer: false, isActive: true
-      }))
-    ];
+  createGame(users) {
+    this.players = users.map((u, i) => ({
+      id: u.id,
+      name: u.name,
+      picture: u.picture,
+      chips: u.chips || 1000,
+      holeCards: [],
+      bet: 0,
+      totalBet: 0,
+      folded: false,
+      allIn: false,
+      isDealer: false,
+      isActive: true,
+      disconnected: false 
+    }));
     this.dealerIndex = 0;
     this.handNumber = 0;
     this.history = [];
     this.startNewHand();
-    return this.getState();
   }
 
   // ── New Hand ────────────────────────────────────────────────
@@ -52,6 +62,7 @@ class GameEngine {
   startNewHand() {
     this.handNumber++;
     this.currentHandLog = [];
+    this.readyForNext.clear();
 
     // Reset player states
     for (const p of this.players) {
@@ -61,14 +72,15 @@ class GameEngine {
       p.folded = false;
       p.allIn = false;
       if (p.chips <= 0) {
-        p.isActive = false;
+        p.isActive = false; // Could auto-rebuy or kick out
       }
     }
 
     // Check if enough active players
-    const activePlayers = this.players.filter(p => p.isActive);
+    const activePlayers = this.players.filter(p => p.isActive && !p.disconnected);
     if (activePlayers.length < 2) {
       this.phase = 'FINISHED';
+      this._log("等待更多玩家加入...");
       return;
     }
 
@@ -112,13 +124,11 @@ class GameEngine {
     this._log(`庄家: ${this.players[this.dealerIndex].name}`);
     this._log(`小盲: ${this.players[sbIndex].name} (${this.smallBlind})`);
     this._log(`大盲: ${this.players[bbIndex].name} (${this.bigBlind})`);
-
-    // If the current player is AI, process AI turns
-    this._processAITurns();
   }
 
   _postBlind(playerIndex, amount) {
     const p = this.players[playerIndex];
+    if (!p) return;
     const actual = Math.min(amount, p.chips);
     p.chips -= actual;
     p.bet += actual;
@@ -127,15 +137,27 @@ class GameEngine {
     if (p.chips === 0) p.allIn = true;
   }
 
+  // ── Connection / Disconnection ──────────────────────────────
+
+  handleDisconnect(userId) {
+    const p = this.players.find(x => x.id === userId);
+    if (p) {
+      p.disconnected = true;
+      this._log(`${p.name} 掉线`);
+      
+      // Auto fold if it's their turn or they are non-folded
+      if (!p.folded && this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED') {
+         this.performAction(userId, 'fold');
+      }
+    }
+  }
+
   // ── Player Actions ──────────────────────────────────────────
 
-  performAction(action, amount = 0) {
+  performAction(userId, action, amount = 0) {
     const player = this.players[this.currentPlayerIndex];
 
-    if (player.isAI) {
-      return { error: '不是你的回合' };
-    }
-    if (player.id !== 0) {
+    if (!player || player.id !== userId) {
       return { error: '不是你的回合' };
     }
     if (this.phase === 'WAITING' || this.phase === 'SHOWDOWN' || this.phase === 'FINISHED') {
@@ -215,16 +237,20 @@ class GameEngine {
     }
 
     // Check if only one player remains
-    const activePlayers = this.players.filter(p => p.isActive && !p.folded);
-    if (activePlayers.length === 1) {
-      this._winByFold(activePlayers[0]);
-      return this.getState();
+    const activePlayers = this.players.filter(p => p.isActive && !p.folded && !p.disconnected);
+    if (activePlayers.length <= 1) {
+      if (activePlayers.length === 1) {
+        this._winByFold(activePlayers[0]);
+      } else {
+         this.phase = 'FINISHED'; // Everyone folded / disconnected
+      }
+      return this.getState(userId);
     }
 
     // Move to next player
     this._advanceTurn();
 
-    return this.getState();
+    return this.getState(userId);
   }
 
   _advanceTurn() {
@@ -237,8 +263,8 @@ class GameEngine {
     }
 
     // Check if all non-folded players have matched the bet or are all-in
-    const needAction = this.players.filter(p => p.isActive && !p.folded && !p.allIn && p.bet < this.currentBet);
-    const canAct = this.players.filter(p => p.isActive && !p.folded && !p.allIn);
+    const needAction = this.players.filter(p => p.isActive && !p.folded && !p.disconnected && !p.allIn && p.bet < this.currentBet);
+    const canAct = this.players.filter(p => p.isActive && !p.folded && !p.disconnected && !p.allIn);
 
     if (needAction.length === 0 && canAct.length <= 1 && this._hasEveryoneActed()) {
       this._advancePhase();
@@ -246,13 +272,11 @@ class GameEngine {
     }
 
     this.currentPlayerIndex = next;
-    this._processAITurns();
   }
 
   _hasEveryoneActed() {
-    // Everyone who can act has matched the current bet
     return this.players.every(p =>
-      !p.isActive || p.folded || p.allIn || p.bet === this.currentBet
+      !p.isActive || p.folded || p.disconnected || p.allIn || p.bet === this.currentBet
     );
   }
 
@@ -260,7 +284,7 @@ class GameEngine {
     let idx = (from + 1) % this.players.length;
     let count = 0;
     while (count < this.players.length) {
-      if (this.players[idx].isActive) return idx;
+      if (this.players[idx].isActive && !this.players[idx].disconnected) return idx;
       idx = (idx + 1) % this.players.length;
       count++;
     }
@@ -271,7 +295,8 @@ class GameEngine {
     let idx = (from + 1) % this.players.length;
     let count = 0;
     while (count < this.players.length) {
-      if (this.players[idx].isActive && !this.players[idx].folded && !this.players[idx].allIn) {
+      const p = this.players[idx];
+      if (p.isActive && !p.folded && !p.disconnected && !p.allIn) {
         return idx;
       }
       idx = (idx + 1) % this.players.length;
@@ -311,27 +336,21 @@ class GameEngine {
         return;
     }
 
-    // Check if all active non-folded players are all-in (no more betting possible)
-    const canAct = this.players.filter(p => p.isActive && !p.folded && !p.allIn);
+    const canAct = this.players.filter(p => p.isActive && !p.folded && !p.disconnected && !p.allIn);
     if (canAct.length <= 1) {
-      // Auto-advance to showdown, deal remaining community cards
       this._runOutBoard();
       return;
     }
 
-    // Set first player to act (after dealer)
     this.currentPlayerIndex = this._nextActiveBettingPlayer(this.dealerIndex);
     if (this.currentPlayerIndex === -1) {
       this._runOutBoard();
       return;
     }
     this.roundInitiator = this.currentPlayerIndex;
-
-    this._processAITurns();
   }
 
   _runOutBoard() {
-    // Deal remaining community cards
     while (this.communityCards.length < 5) {
       this.communityCards.push(this.deck.pop());
     }
@@ -341,80 +360,12 @@ class GameEngine {
     this._showdown();
   }
 
-  // ── AI Logic ────────────────────────────────────────────────
-
-  _processAITurns() {
-    while (this.phase !== 'WAITING' && this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED') {
-      const current = this.players[this.currentPlayerIndex];
-      if (!current.isAI || !current.isActive || current.folded || current.allIn) {
-        break;
-      }
-
-      const { action, amount } = this._aiDecide(this.currentPlayerIndex);
-      const result = this._executeAction(this.currentPlayerIndex, action, amount);
-      if (result && result.error) {
-        // Fallback: fold
-        this._executeAction(this.currentPlayerIndex, 'fold');
-      }
-
-      // If phase changed (showdown/finished), stop
-      if (this.phase === 'SHOWDOWN' || this.phase === 'FINISHED') break;
-    }
-  }
-
-  _aiDecide(playerIndex) {
-    const player = this.players[playerIndex];
-    const strength = handStrength(player.holeCards, this.communityCards);
-    const callAmount = this.currentBet - player.bet;
-    const potOdds = callAmount > 0 ? callAmount / (this.pot + callAmount) : 0;
-
-    // Add some randomness
-    const r = Math.random();
-    const adjustedStrength = strength + (r - 0.5) * 0.2;
-
-    if (callAmount === 0) {
-      // Can check or raise
-      if (adjustedStrength > 0.7) {
-        // Strong hand: raise
-        const raiseAmount = this.currentBet + this.minRaise + Math.floor(Math.random() * this.pot * 0.5);
-        return { action: 'raise', amount: raiseAmount };
-      }
-      if (adjustedStrength > 0.3) {
-        // Medium: sometimes bet, sometimes check
-        if (r > 0.5) {
-          const raiseAmount = this.currentBet + this.minRaise;
-          return { action: 'raise', amount: raiseAmount };
-        }
-      }
-      return { action: 'check', amount: 0 };
-    }
-
-    // Must call, raise, or fold
-    if (adjustedStrength > 0.7) {
-      // Strong hand: raise
-      const raiseAmount = this.currentBet + this.minRaise + Math.floor(Math.random() * this.pot * 0.3);
-      return { action: 'raise', amount: raiseAmount };
-    }
-    if (adjustedStrength > potOdds + 0.1) {
-      // Decent odds: call
-      return { action: 'call', amount: 0 };
-    }
-    if (adjustedStrength > potOdds && r > 0.4) {
-      // Marginal: sometimes call
-      return { action: 'call', amount: 0 };
-    }
-
-    // Weak hand: fold
-    return { action: 'fold', amount: 0 };
-  }
-
   // ── Showdown & Settlement ───────────────────────────────────
 
   _showdown() {
     this.phase = 'SHOWDOWN';
-    const activePlayers = this.players.filter(p => p.isActive && !p.folded);
+    const activePlayers = this.players.filter(p => p.isActive && !p.folded && !p.disconnected);
 
-    // Evaluate hands
     const results = [];
     for (const p of activePlayers) {
       const best = evaluateBest([...p.holeCards, ...this.communityCards]);
@@ -428,13 +379,9 @@ class GameEngine {
       this._log(`${p.name}: ${best.name} (${p.holeCards.map(cardToString).join(' ')})`);
     }
 
-    // Sort by hand rank (best first)
     results.sort((a, b) => compareHands(b.best, a.best));
-
-    // Distribute pot (handle side pots)
     this._distributePot(results);
 
-    // Save history
     this.history.push({
       handNumber: this.handNumber,
       communityCards: this.communityCards.map(cardToString),
@@ -460,10 +407,7 @@ class GameEngine {
   }
 
   _distributePot(results) {
-    // Build side pots based on all-in amounts
     let remainingPot = this.pot;
-
-    // Simple pot distribution (supports side pots)
     const allBets = [...new Set(results.map(r => r.totalBet))].sort((a, b) => a - b);
 
     let prevBet = 0;
@@ -471,23 +415,21 @@ class GameEngine {
       const increment = betLevel - prevBet;
       if (increment <= 0) continue;
 
-      // Count how many players contributed at this level
       const eligible = this.players.filter(p => p.isActive && p.totalBet >= betLevel);
       const potPortion = increment * eligible.length;
 
-      // Find best hand among eligible, non-folded players
       const eligibleResults = results.filter(r =>
-        eligible.some(p => p.id === r.playerId) && !this.players[r.playerId].folded
+        eligible.some(p => p.id === r.playerId) && !this.players.find(x => x.id === r.playerId).folded
       );
 
       if (eligibleResults.length > 0) {
-        // Find winner(s) at this level
         const bestHand = eligibleResults[0].best;
         const winners = eligibleResults.filter(r => compareHands(r.best, bestHand) === 0);
         const share = Math.floor(potPortion / winners.length);
 
         for (const w of winners) {
-          this.players[w.playerId].chips += share;
+          const wObj = this.players.find(x => x.id === w.playerId);
+          wObj.chips += share;
           w.won = (w.won || 0) + share;
           this._log(`${w.playerName} 赢得 ${share} 筹码`);
         }
@@ -497,11 +439,11 @@ class GameEngine {
       prevBet = betLevel;
     }
 
-    // Distribute any remaining chips (from rounding) to first winner
     if (remainingPot > 0 && results.length > 0) {
-      const nonFolded = results.filter(r => !this.players[r.playerId].folded);
+      const nonFolded = results.filter(r => !this.players.find(x=>x.id === r.playerId).folded);
       if (nonFolded.length > 0) {
-        this.players[nonFolded[0].playerId].chips += remainingPot;
+        const wObj = this.players.find(x => x.id === nonFolded[0].playerId);
+        wObj.chips += remainingPot;
         nonFolded[0].won = (nonFolded[0].won || 0) + remainingPot;
       }
     }
@@ -528,28 +470,37 @@ class GameEngine {
     this.phase = 'SHOWDOWN';
   }
 
-  // ── Next Hand ───────────────────────────────────────────────
+  // ── Multiplayer Turn coordination ───────────────────────────
+
+  playerRequestedNextHand(userId) {
+    this.readyForNext.add(userId);
+    const activePlayers = this.players.filter(p => !p.disconnected);
+    if (this.readyForNext.size >= activePlayers.length) {
+      return { ready: true };
+    }
+    return { ready: false, count: this.readyForNext.size, total: activePlayers.length };
+  }
 
   nextHand() {
     if (this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED') {
       return { error: '当前手牌尚未结束' };
     }
 
-    // Reset busted AI players with rebuy
+    // basic rebuy for busted players
     for (const p of this.players) {
-      if (p.isAI && p.chips <= 0) {
+      if (p.chips <= 0) {
         p.chips = 1000;
         p.isActive = true;
       }
     }
 
     this.startNewHand();
-    return this.getState();
   }
 
   // ── State Getter ────────────────────────────────────────────
+  // Filters hole cards of opponents
 
-  getState() {
+  getState(viewerUserId) {
     const isShowdown = this.phase === 'SHOWDOWN';
 
     return {
@@ -568,35 +519,35 @@ class GameEngine {
       players: this.players.map(p => ({
         id: p.id,
         name: p.name,
+        picture: p.picture,
         chips: p.chips,
         bet: p.bet,
         totalBet: p.totalBet,
         folded: p.folded,
         allIn: p.allIn,
-        isAI: p.isAI,
         isDealer: p.isDealer,
         isActive: p.isActive,
-        holeCards: (!p.isAI || isShowdown || this.phase === 'FINISHED')
+        disconnected: p.disconnected,
+        holeCards: (p.id === viewerUserId || isShowdown || this.phase === 'FINISHED')
           ? p.holeCards.map(c => ({ rank: c.rank, suit: c.suit, display: cardToString(c) }))
           : p.holeCards.map(() => ({ hidden: true })),
-        // If showdown, include hand evaluation
         ...(isShowdown && !p.folded && p.isActive && this.communityCards.length === 5 ? {
           bestHand: evaluateBest([...p.holeCards, ...this.communityCards])?.name
         } : {})
       })),
-      actions: this._getAvailableActions(),
+      actions: this._getAvailableActions(viewerUserId),
       log: this.currentHandLog.slice(-10)
     };
   }
 
-  _getAvailableActions() {
+  _getAvailableActions(userId) {
     if (this.phase === 'SHOWDOWN' || this.phase === 'FINISHED') {
-      return ['nextHand'];
+      return ['nextHand']; // Handled as game:next via socket
     }
     if (this.phase === 'WAITING') return [];
 
     const player = this.players[this.currentPlayerIndex];
-    if (player.isAI || player.folded || player.allIn) return [];
+    if (!player || player.id !== userId || player.folded || player.allIn || player.disconnected) return [];
 
     const actions = ['fold'];
     const callAmount = this.currentBet - player.bet;
@@ -614,16 +565,6 @@ class GameEngine {
     actions.push('allin');
 
     return actions;
-  }
-
-  getHistory() {
-    return this.history.slice().reverse();
-  }
-
-  // ── Logging ─────────────────────────────────────────────────
-
-  _log(msg) {
-    this.currentHandLog.push(msg);
   }
 }
 

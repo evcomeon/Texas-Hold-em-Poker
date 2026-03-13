@@ -1,5 +1,5 @@
 // ============================================================
-// Texas Hold'em Poker - Frontend Client
+// Texas Hold'em Poker - Frontend Multiplayer Client
 // ============================================================
 
 const API = '/api';
@@ -7,18 +7,48 @@ const API = '/api';
 // ── State ─────────────────────────────────────────────────────
 let gameState = null;
 let raiseMode = false;
+let user = null;
+let token = localStorage.getItem('poker_token') || null;
+let socket = null;
+
+// Replace with your Google Client ID for actual deployment
+const GOOGLE_CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID_HERE';
 
 // ── DOM References ────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 const els = {
-  startScreen:    $('#start-screen'),
+  // Screens
+  loginScreen:    $('#login-screen'),
+  lobbyScreen:    $('#lobby-screen'),
   gameArea:       $('#game-area'),
-  playerName:     $('#player-name'),
-  btnStart:       $('#btn-start'),
+  
+  // Navbar
+  userNavbar:     $('#user-navbar'),
+  navAvatar:      $('#nav-avatar'),
+  navName:        $('#nav-name'),
+  navChips:       $('#nav-chips'),
+  btnLogout:      $('#btn-logout'),
+
+  // Login
+  googleLoginBtn: $('#google-login-btn'),
+  mockPlayerName: $('#mock-player-name'),
+  btnMockLogin:   $('#btn-mock-login'),
+
+  // Lobby
+  lblOnlineCount: $('#lobby-online-count'),
+  btnFindMatch:   $('#btn-find-match'),
+  queueStatus:    $('#queue-status'),
+  queueCount:     $('#queue-count'),
+  btnCancelMatch: $('#btn-cancel-match'),
+
+  // Game Header
+  globalOnline:   $('#global-online-count'),
   handNumber:     $('#hand-number'),
   phaseBadge:     $('#phase-badge'),
+  
+  // Game Table
   communityCards: $('#community-cards'),
   potAmount:      $('#pot-amount'),
   actionButtons:  $('#action-buttons'),
@@ -27,6 +57,8 @@ const els = {
   raiseValue:     $('#raise-value'),
   btnConfirmRaise:$('#btn-confirm-raise'),
   notification:   $('#notification'),
+  
+  // History
   historyToggle:  $('#history-toggle'),
   historyPanel:   $('#history-panel'),
   historyClose:   $('#history-close'),
@@ -34,61 +66,190 @@ const els = {
   gameLog:        $('#game-log'),
 };
 
-// ── API Client ────────────────────────────────────────────────
-async function api(method, path, body = null) {
-  const opts = {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-  };
-  if (body) opts.body = JSON.stringify(body);
-
-  try {
-    const res = await fetch(`${API}${path}`, opts);
-    const data = await res.json();
-    if (!res.ok) {
-      showNotification(data.error || '操作失败', 'danger');
-      return null;
+// ── Initialization & Auth ─────────────────────────────────────
+async function init() {
+  setupEventListeners();
+  
+  // Try to restore session
+  if (token) {
+    const success = await fetchCurrentUser();
+    if (success) {
+      showLobby();
+      connectSocket();
+      return;
     }
-    return data;
-  } catch (err) {
-    showNotification('网络错误，请检查服务器', 'danger');
-    console.error(err);
-    return null;
   }
+  
+  showLogin();
+  initGoogleAuth();
+}
+
+function initGoogleAuth() {
+  if (window.google) {
+    google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      callback: handleGoogleLogin
+    });
+    google.accounts.id.renderButton(
+      els.googleLoginBtn,
+      { theme: 'outline', size: 'large', type: 'standard' }
+    );
+  }
+}
+
+async function handleGoogleLogin(response) {
+  await login(response.credential);
+}
+
+async function handleMockLogin() {
+  const name = els.mockPlayerName.value.trim() || 'Guest' + Math.floor(Math.random()*1000);
+  await login(`mock_${name}`);
+}
+
+async function login(credential) {
+  try {
+    const res = await fetch(`${API}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credential })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    token = data.token;
+    user = data.user;
+    localStorage.setItem('poker_token', token);
+    
+    showLobby();
+    connectSocket();
+  } catch (err) {
+    showNotification('登录失败: ' + err.message, 'danger');
+  }
+}
+
+async function fetchCurrentUser() {
+  try {
+    const res = await fetch(`${API}/auth/me`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    user = data.user;
+    return true;
+  } catch (err) {
+    logout();
+    return false;
+  }
+}
+
+function logout() {
+  token = null;
+  user = null;
+  localStorage.removeItem('poker_token');
+  if (socket) socket.disconnect();
+  showLogin();
+}
+
+// ── Screen Transitions ────────────────────────────────────────
+function showLogin() {
+  els.loginScreen.classList.remove('hidden');
+  els.lobbyScreen.classList.add('hidden');
+  els.gameArea.classList.add('hidden');
+  els.userNavbar.classList.add('hidden');
+  els.globalOnline.classList.add('hidden');
+}
+
+function showLobby() {
+  els.loginScreen.classList.add('hidden');
+  els.lobbyScreen.classList.remove('hidden');
+  els.gameArea.classList.add('hidden');
+  els.userNavbar.classList.remove('hidden');
+  els.globalOnline.classList.remove('hidden');
+  
+  // Update Navbar
+  els.navName.textContent = user.name;
+  els.navAvatar.src = user.picture;
+  els.navChips.textContent = user.chips;
+
+  // Reset lobby state
+  els.btnFindMatch.classList.remove('hidden');
+  els.queueStatus.classList.add('hidden');
+}
+
+function showGame() {
+  els.loginScreen.classList.add('hidden');
+  els.lobbyScreen.classList.add('hidden');
+  els.gameArea.classList.remove('hidden');
+  
+  // Hide global online in game, show hand info
+  els.globalOnline.classList.add('hidden');
+  els.handNumber.classList.remove('hidden');
+  els.phaseBadge.classList.remove('hidden');
+  els.historyToggle.classList.remove('hidden');
+}
+
+// ── WebSockets ────────────────────────────────────────────────
+function connectSocket() {
+  socket = io({
+    auth: { token }
+  });
+
+  socket.on('connect', () => {
+    console.log('Connected to server');
+  });
+
+  socket.on('connect_error', (err) => {
+    console.error('Socket connection error', err);
+    if (err.message === 'Authentication error') logout();
+  });
+
+  socket.on('lobby:stats', (data) => {
+    els.lblOnlineCount.textContent = data.online;
+    els.globalOnline.textContent = `在线: ${data.online}`;
+  });
+
+  socket.on('lobby:queued', (data) => {
+    els.btnFindMatch.classList.add('hidden');
+    els.queueStatus.classList.remove('hidden');
+    els.queueCount.textContent = data.queueSize;
+  });
+
+  socket.on('lobby:left', () => {
+    els.btnFindMatch.classList.remove('hidden');
+    els.queueStatus.classList.add('hidden');
+  });
+
+  socket.on('game:start', (data) => {
+    showGame();
+  });
+
+  socket.on('game:state', (state) => {
+    gameState = state;
+    render();
+  });
+
+  socket.on('game:error', (err) => {
+    showNotification(err.error, 'danger');
+  });
+
+  socket.on('game:notification', (data) => {
+    showNotification(data.msg, 'info');
+  });
 }
 
 // ── Game Actions ──────────────────────────────────────────────
-async function startGame() {
-  const name = els.playerName.value.trim() || '玩家';
-  const state = await api('POST', '/game/new', { playerName: name });
-  if (state) {
-    gameState = state;
-    els.startScreen.classList.add('hidden');
-    els.gameArea.classList.remove('hidden');
-    render();
+function performAction(action, amount = 0) {
+  if (socket) {
+    socket.emit('game:action', { action, amount });
   }
 }
 
-async function performAction(action, amount = 0) {
-  const state = await api('POST', '/game/action', { action, amount });
-  if (state) {
-    gameState = state;
-    render();
+function nextHand() {
+  if (socket) {
+    socket.emit('game:next');
+    // Hide buttons, show waiting msg
+    els.actionButtons.innerHTML = `<span style="color: var(--text-muted); font-size: 0.85rem;">等待其他玩家准备...</span>`;
   }
-}
-
-async function nextHand() {
-  const state = await api('POST', '/game/next');
-  if (state) {
-    gameState = state;
-    raiseMode = false;
-    render();
-  }
-}
-
-async function loadHistory() {
-  const history = await api('GET', '/game/history');
-  if (history) renderHistory(history);
 }
 
 // ── Rendering ─────────────────────────────────────────────────
@@ -125,15 +286,40 @@ function renderHeader() {
 }
 
 function renderPlayers() {
-  gameState.players.forEach((player, i) => {
+  // We want to center the current user at the bottom (seat-0)
+  // and distribute others around the table.
+  
+  if (!gameState.players || gameState.players.length === 0) return;
+
+  // Find my index
+  let myIndex = gameState.players.findIndex(p => p.id === user.id);
+  if (myIndex === -1) myIndex = 0; // Spectator fallback
+
+  // Reorder players so I am first
+  const orderedPlayers = [
+    gameState.players[myIndex],
+    ...gameState.players.slice(myIndex + 1),
+    ...gameState.players.slice(0, myIndex)
+  ];
+
+  // Clear all seats
+  for(let i=0; i<=3; i++) {
+    const seat = $(`#seat-${i}`);
+    if (seat) seat.innerHTML = '';
+  }
+
+  orderedPlayers.forEach((player, i) => {
+    // Only up to 4 players supported by the UI right now mapping to 0,1,2,3
+    if (i > 3) return;
     const seatEl = $(`#seat-${i}`);
     if (!seatEl) return;
 
-    const isCurrent = (i === gameState.currentPlayerIndex) &&
+    // Check if it's their turn (original index matters here)
+    const originalIndex = gameState.players.findIndex(p => p.id === player.id);
+    const isCurrent = (originalIndex === gameState.currentPlayerIndex) &&
       gameState.phase !== 'SHOWDOWN' && gameState.phase !== 'FINISHED';
     const isShowdown = gameState.phase === 'SHOWDOWN';
 
-    // Check if this player won
     let isWinner = false;
     let wonAmount = 0;
     if (isShowdown && gameState.lastAction?.action === 'showdown') {
@@ -147,11 +333,14 @@ function renderPlayers() {
 
     let panelClass = 'player-panel';
     if (isCurrent) panelClass += ' is-current';
-    if (player.folded) panelClass += ' is-folded';
+    if (player.folded || player.disconnected) panelClass += ' is-folded';
     if (isWinner) panelClass += ' is-winner';
 
     let html = `<div class="${panelClass}">`;
     html += `<div class="player-name">`;
+    if (player.picture) {
+      html += `<img src="${player.picture}" class="avatar-sm" style="width:18px;height:18px;vertical-align:middle;margin-right:4px;">`;
+    }
     html += player.name;
     if (player.isDealer) html += ` <span class="dealer-chip">D</span>`;
     html += `</div>`;
@@ -161,7 +350,9 @@ function renderPlayers() {
       html += `<div class="player-bet">下注: ${player.bet}</div>`;
     }
 
-    if (player.folded) {
+    if (player.disconnected) {
+       html += `<div class="player-status">已掉线</div>`;
+    } else if (player.folded) {
       html += `<div class="player-status">已弃牌</div>`;
     } else if (player.allIn) {
       html += `<div class="player-status" style="color: var(--accent-gold)">ALL IN</div>`;
@@ -222,7 +413,7 @@ function renderActions() {
   let html = '';
 
   if (actions.includes('nextHand')) {
-    html += `<button class="btn btn-primary btn-lg" onclick="window._nextHand()">下一手 ➜</button>`;
+    html += `<button class="btn btn-primary btn-lg" onclick="window._nextHand()">准备下一手 ➜</button>`;
     els.actionButtons.innerHTML = html;
     els.raiseControls.classList.add('hidden');
     raiseMode = false;
@@ -243,7 +434,9 @@ function renderActions() {
     html += `<button class="btn btn-ghost" onclick="window._action('check')">过牌</button>`;
   }
   if (actions.includes('call')) {
-    const callAmount = gameState.currentBet - (gameState.players[0]?.bet || 0);
+    const myIndex = gameState.players.findIndex(p => p.id === user.id);
+    const myBet = myIndex >= 0 ? gameState.players[myIndex].bet : 0;
+    const callAmount = gameState.currentBet - myBet;
     html += `<button class="btn btn-success" onclick="window._action('call')">跟注 ${callAmount}</button>`;
   }
   if (actions.includes('raise')) {
@@ -257,8 +450,8 @@ function renderActions() {
 
   // Update raise controls
   if (raiseMode && actions.includes('raise')) {
-    const player = gameState.players[0];
-    const minRaise = gameState.currentBet + 20; // minimum raise
+    const player = gameState.players.find(p => p.id === user.id);
+    const minRaise = gameState.currentBet + 20; // assumed min raise
     const maxRaise = player.chips + player.bet;
     els.raiseSlider.min = minRaise;
     els.raiseSlider.max = maxRaise;
@@ -294,30 +487,6 @@ function renderLastAction() {
   showNotification(text, 'info');
 }
 
-function renderHistory(history) {
-  if (!history || history.length === 0) {
-    els.historyList.innerHTML = '<div style="color: var(--text-muted); text-align:center; padding:20px;">暂无记录</div>';
-    return;
-  }
-
-  let html = '';
-  for (const hand of history) {
-    html += `<div class="history-item">`;
-    html += `<div class="history-item-header">第 ${hand.handNumber} 手</div>`;
-    html += `<div class="history-item-cards">公共牌: ${hand.communityCards.join(' ') || '无'}</div>`;
-    html += `<div class="history-item-result">`;
-    for (const r of hand.results) {
-      const isWinner = r.won > 0;
-      html += `<div class="${isWinner ? 'winner' : ''}">${r.name}: ${r.hand}`;
-      if (r.cards.length) html += ` (${r.cards.join(' ')})`;
-      if (r.won > 0) html += ` → +${r.won}`;
-      html += `</div>`;
-    }
-    html += `</div></div>`;
-  }
-  els.historyList.innerHTML = html;
-}
-
 // ── Notifications ─────────────────────────────────────────────
 let notifTimer = null;
 function showNotification(text, type = 'info') {
@@ -331,23 +500,33 @@ function showNotification(text, type = 'info') {
   }, 2500);
 }
 
-// ── Global Event Handlers ─────────────────────────────────────
-window._action = (action) => performAction(action);
-window._nextHand = () => nextHand();
-window._toggleRaise = () => {
-  raiseMode = !raiseMode;
-  renderActions();
-};
+// ── Events ────────────────────────────────────────────────────
+function setupEventListeners() {
+  els.btnMockLogin.addEventListener('click', handleMockLogin);
+  els.mockPlayerName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleMockLogin();
+  });
+  
+  els.btnLogout.addEventListener('click', logout);
 
-// ── Init ──────────────────────────────────────────────────────
-function init() {
-  // Start button
-  els.btnStart.addEventListener('click', startGame);
-  els.playerName.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') startGame();
+  els.btnFindMatch.addEventListener('click', () => {
+    if (socket) socket.emit('lobby:join');
   });
 
-  // Raise slider
+  els.btnCancelMatch.addEventListener('click', () => {
+    if (socket) socket.emit('lobby:leave');
+  });
+
+  els.historyToggle.addEventListener('click', () => {
+    els.historyPanel.classList.remove('hidden');
+    // For now we don't have a history emit, could get from engine
+    // socket.emit('game:history');
+  });
+
+  els.historyClose.addEventListener('click', () => {
+    els.historyPanel.classList.add('hidden');
+  });
+
   els.raiseSlider.addEventListener('input', () => {
     els.raiseValue.textContent = els.raiseSlider.value;
   });
@@ -357,19 +536,15 @@ function init() {
     raiseMode = false;
     performAction('raise', amount);
   });
-
-  // History panel
-  els.historyToggle.addEventListener('click', () => {
-    els.historyPanel.classList.remove('hidden');
-    loadHistory();
-  });
-
-  els.historyClose.addEventListener('click', () => {
-    els.historyPanel.classList.add('hidden');
-  });
-
-  // Focus name input
-  els.playerName.focus();
 }
 
+// Global exposure for inline HTML handlers
+window._action = (action) => performAction(action);
+window._nextHand = () => nextHand();
+window._toggleRaise = () => {
+  raiseMode = !raiseMode;
+  renderActions();
+};
+
+// Start
 init();

@@ -3,12 +3,16 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="德州扑克 - 在线游戏" />
-  <title>🃏 德州扑克</title>
+  <meta name="description" content="德州扑克 - 多人在线游戏" />
+  <title>🃏 德州扑克 - 多人在线</title>
+  
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
+  
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
   <div id="app">
@@ -16,22 +20,61 @@
     <header class="header">
       <h1>🃏 德州扑克</h1>
       <div class="header-info">
-        <span id="hand-number">第 0 手</span>
-        <span id="phase-badge" class="badge">等待中</span>
+        <span id="global-online-count" class="badge">在线: 0</span>
+        <span id="hand-number" class="hidden">第 0 手</span>
+        <span id="phase-badge" class="badge hidden">等待中</span>
       </div>
     </header>
 
-    <!-- Start Screen -->
-    <div id="start-screen" class="start-screen">
-      <div class="start-card">
+    <!-- Navigation / Top Bar -->
+    <div id="user-navbar" class="user-navbar hidden">
+      <div class="user-profile">
+        <img id="nav-avatar" src="" alt="Avatar" class="avatar-sm" />
+        <span id="nav-name">玩家名</span>
+        <span class="chips-badge">💰 <span id="nav-chips">0</span></span>
+      </div>
+      <button id="btn-logout" class="btn btn-ghost btn-sm">退出</button>
+    </div>
+
+    <!-- Login Screen -->
+    <div id="login-screen" class="screen-container">
+      <div class="glass-card text-center">
         <div class="start-icon">🃏</div>
         <h2>德州扑克</h2>
-        <p>Texas Hold'em Poker</p>
-        <div class="start-input-group">
-          <label for="player-name">你的名字</label>
-          <input type="text" id="player-name" placeholder="玩家" maxlength="10" />
+        <p>多人实时对战</p>
+        
+        <div class="login-options">
+          <div id="google-login-btn" class="g-btn-wrapper"></div>
+          
+          <div class="divider"><span>OR</span></div>
+          
+          <div class="start-input-group">
+            <input type="text" id="mock-player-name" placeholder="输入昵称快速体验" maxlength="10" />
+          </div>
+          <button id="btn-mock-login" class="btn btn-primary btn-lg w-full">游客登录</button>
         </div>
-        <button id="btn-start" class="btn btn-primary btn-lg">开始游戏</button>
+      </div>
+    </div>
+
+    <!-- Lobby Screen -->
+    <div id="lobby-screen" class="screen-container hidden">
+      <div class="glass-card lobby-card">
+        <h2>游戏大厅</h2>
+        
+        <div class="lobby-stats">
+          <div class="stat-box">
+            <span class="stat-label">当前在线玩家</span>
+            <span id="lobby-online-count" class="stat-value text-accent">--</span>
+          </div>
+        </div>
+        
+        <div class="queue-status hidden" id="queue-status">
+          <div class="spinner"></div>
+          <p>正在匹配对手... (<span id="queue-count">1</span>/2)</p>
+          <button id="btn-cancel-match" class="btn btn-danger mt-10">取消匹配</button>
+        </div>
+
+        <button id="btn-find-match" class="btn btn-primary btn-lg pulse-btn">开始匹配</button>
       </div>
     </div>
 
@@ -40,7 +83,7 @@
       <!-- Poker Table -->
       <div class="table-container">
         <div class="poker-table">
-          <!-- Opponent Seats -->
+          <!-- Opponent Seats (Supports up to 3 opponents flexibly) -->
           <div class="seats">
             <div class="seat seat-top-left" id="seat-1"></div>
             <div class="seat seat-top" id="seat-2"></div>
@@ -80,7 +123,7 @@
     </div>
 
     <!-- History Panel -->
-    <div class="history-toggle" id="history-toggle">📋</div>
+    <div class="history-toggle hidden" id="history-toggle">📋</div>
     <div class="history-panel hidden" id="history-panel">
       <div class="history-header">
         <h3>对局记录</h3>
@@ -93,6 +136,7 @@
     <div class="game-log" id="game-log"></div>
   </div>
 
+  <script src="/socket.io/socket.io.js"></script>
   <script type="module" src="main.js"></script>
 </body>
 </html>
