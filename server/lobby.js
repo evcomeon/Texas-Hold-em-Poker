@@ -406,10 +406,14 @@ class LobbyManager {
     
     // 2. 将有足够筹码的观战者转为玩家（如果还有空位）
     const stillSpectators = [];
+    this._log(`处理观战者: ${room.spectators.length} 人, 当前玩家: ${room.players.length}/${this.MAX_PLAYERS}`);
+    
     while (room.spectators.length > 0 && room.players.length < this.MAX_PLAYERS) {
       const specId = room.spectators.shift();
       room.engine.removeSpectator(specId);
       let specUser = this._findUserById(specId);
+      
+      this._log(`检查观战者 ${specId}: 用户数据 ${specUser ? '存在' : '不存在'}`);
       
       if (specUser) {
         // 从数据库获取最新筹码
@@ -417,6 +421,7 @@ class LobbyManager {
           const dbUser = await UserModel.findById(specId);
           if (dbUser) {
             specUser.chips = dbUser.chips_balance;
+            this._log(`观战者 ${specId} 筹码: ${specUser.chips}, 最低要求: ${minChips}`);
           }
         } catch (e) {
           console.error('Failed to fetch spectator chips:', e);
@@ -426,6 +431,7 @@ class LobbyManager {
         if (specUser.chips >= minChips) {
           room.players.push(specUser);
           room.engine.addPlayer(specUser);
+          this._log(`观战者 ${specId} 转为玩家`);
           
           // 更新状态
           for (const [sId, data] of this.connectedUsers.entries()) {

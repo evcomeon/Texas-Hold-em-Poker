@@ -219,8 +219,8 @@ function configureSockets(server) {
         readyPlayers: Array.from(engine.readyForNext)
       });
       
-      if (result.ready) {
-        // All active players requested next hand
+      if (result.ready || result.needSpectatorMatch) {
+        // All active players requested next hand OR need to match from spectators
         // 获取盲注配置
         const stakeConfig = lobby.getStakeLevels()[room.stakeLevel || 'medium'];
         

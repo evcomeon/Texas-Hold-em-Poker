@@ -710,10 +710,11 @@ class GameEngine {
     
     this._log(`准备请求: ${userId}, 活跃玩家: ${activePlayers.map(p => p.name).join(',')}, 准备数: ${readyActiveCount}/${total}`);
     
-    // 如果活跃玩家不足2人，不能开始新一局
+    // 如果活跃玩家不足2人，需要检查观战者是否有足够筹码
     if (activePlayers.length < 2) {
-      this._log(`活跃玩家不足2人，无法开始新一局`);
-      return { ready: false, count: readyActiveCount, total, error: '玩家不足，无法开始新一局' };
+      this._log(`活跃玩家不足2人，需要检查观战者`);
+      // 返回特殊标志，表示需要尝试从观战者中匹配
+      return { ready: true, count: readyActiveCount, total, needSpectatorMatch: true };
     }
     
     if (readyActiveCount >= activePlayers.length) {
