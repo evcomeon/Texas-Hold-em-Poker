@@ -708,8 +708,11 @@ class GameEngine {
     // 只计算活跃玩家的准备数量
     const readyActiveCount = activePlayers.filter(p => this.readyForNext.has(p.id)).length;
     
+    this._log(`准备请求: ${userId}, 活跃玩家: ${activePlayers.map(p => p.name).join(',')}, 准备数: ${readyActiveCount}/${total}`);
+    
     // 如果活跃玩家不足2人，不能开始新一局
     if (activePlayers.length < 2) {
+      this._log(`活跃玩家不足2人，无法开始新一局`);
       return { ready: false, count: readyActiveCount, total, error: '玩家不足，无法开始新一局' };
     }
     

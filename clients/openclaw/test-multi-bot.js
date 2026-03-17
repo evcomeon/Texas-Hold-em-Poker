@@ -90,6 +90,14 @@ class TestBot {
 
     this.socket.on('game:state', (state) => {
       this.gameState = state;
+      // 更新观战者状态（当观战者转为玩家时）
+      if (this.isSpectator !== state.isSpectator) {
+        this.isSpectator = state.isSpectator;
+        if (!this.isSpectator) {
+          this.log('从观战者转为玩家');
+          this.isReady = false;
+        }
+      }
       this.handleGameState(state);
     });
 
