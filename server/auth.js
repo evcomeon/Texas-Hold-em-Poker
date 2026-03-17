@@ -4,22 +4,17 @@
 
 const { OAuth2Client } = require('google-auth-library');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_poker_key_2026';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '365d';
 
-/**
- * Verify Google OAuth credential token
- * @param {string} token - The credential token from Google Identity Services
- * @returns {object} Payload with user details
- */
 async function verifyGoogleToken(token) {
-  // Check if it's a mock token for development
   if (token.startsWith('mock_')) {
     const mockName = token.replace('mock_', '') || 'TestUser';
     return {
-      sub: `mock_id_${Math.floor(Math.random() * 100000)}`,
+      sub: `mock_id_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
       name: mockName,
       picture: `https://api.dicebear.com/7.x/avataaars/svg?seed=${mockName}`,
       email: `${mockName.toLowerCase()}@example.com`
@@ -38,24 +33,16 @@ async function verifyGoogleToken(token) {
   }
 }
 
-/**
- * Generate a JWT for a user
- * @param {object} user - User object containing id, name, etc.
- * @returns {string} Signed JWT
- */
 function generateJWT(user) {
-  return jwt.sign(
-    { id: user.id, name: user.name, picture: user.picture },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN }
-  );
+  const payload = {
+    id: user.id,
+    name: user.username || user.name,
+    username: user.username || user.name,
+    picture: user.avatar_url || user.picture,
+  };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 }
 
-/**
- * Verify and decode a JWT
- * @param {string} token
- * @returns {object} Decoded payload
- */
 function verifyJWT(token) {
   try {
     return jwt.verify(token, JWT_SECRET);
@@ -64,8 +51,37 @@ function verifyJWT(token) {
   }
 }
 
+const SALT_LENGTH = 16;
+const ITERATIONS = 100000;
+const KEY_LENGTH = 64;
+const DIGEST = 'sha512';
+
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(SALT_LENGTH).toString('hex');
+  return new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, salt, ITERATIONS, KEY_LENGTH, DIGEST, (err, derivedKey) => {
+      if (err) reject(err);
+      resolve(`${salt}:${derivedKey.toString('hex')}`);
+    });
+  });
+}
+
+async function comparePassword(password, storedHash) {
+  const [salt, hash] = storedHash.split(':');
+  if (!salt || !hash) return false;
+  
+  return new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, salt, ITERATIONS, KEY_LENGTH, DIGEST, (err, derivedKey) => {
+      if (err) reject(err);
+      resolve(derivedKey.toString('hex') === hash);
+    });
+  });
+}
+
 module.exports = {
   verifyGoogleToken,
   generateJWT,
-  verifyJWT
+  verifyJWT,
+  hashPassword,
+  comparePassword,
 };

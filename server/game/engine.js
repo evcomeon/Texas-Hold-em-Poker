@@ -1,5 +1,5 @@
 // ============================================================
-// Texas Hold'em Poker - Multiplayer Game Engine
+// Texas Hold'em Poker - Multiplayer Game Engine (支持观战)
 // ============================================================
 
 const { createDeck, shuffle, cardToString } = require('./deck');
@@ -8,8 +8,9 @@ const { evaluateBest, compareHands } = require('./evaluator');
 const PHASES = ['WAITING', 'PRE_FLOP', 'FLOP', 'TURN', 'RIVER', 'SHOWDOWN', 'FINISHED'];
 
 class GameEngine {
-  constructor() {
+  constructor(config = {}) {
     this.players = [];
+    this.spectators = [];
     this.deck = [];
     this.communityCards = [];
     this.pot = 0;
@@ -17,16 +18,27 @@ class GameEngine {
     this.phase = 'WAITING';
     this.dealerIndex = 0;
     this.currentPlayerIndex = 0;
-    this.smallBlind = 10;
-    this.bigBlind = 20;
-    this.minRaise = 20;
+    this.smallBlind = config.smallBlind || 10;
+    this.bigBlind = config.bigBlind || 20;
+    this.minRaise = this.bigBlind;
     this.currentBet = 0;
     this.history = [];
     this.handNumber = 0;
     this.currentHandLog = [];
     this.lastAction = null;
     this.roundInitiator = -1;
-    this.readyForNext = new Set(); // Track who has requested next hand
+    this.readyForNext = new Set();
+    this.maxPlayers = 8;
+    
+    this.turnTimeout = parseInt(process.env.TURN_TIMEOUT) || config.turnTimeout || 30;
+    this.turnTimer = null;
+    this.turnStartTime = null;
+    this.onTimeoutCallback = null;
+    
+    this.readyTimeout = parseInt(process.env.READY_TIMEOUT) || config.readyTimeout || 30;
+    this.readyTimer = null;
+    this.readyStartTime = null;
+    this.onReadyTimeoutCallback = null;
   }
 
   _log(msg) {
@@ -39,7 +51,7 @@ class GameEngine {
   createGame(users) {
     this.players = users.map((u, i) => ({
       id: u.id,
-      name: u.name,
+      name: u.name || u.username,
       picture: u.picture,
       chips: u.chips || 1000,
       holeCards: [],
@@ -49,12 +61,93 @@ class GameEngine {
       allIn: false,
       isDealer: false,
       isActive: true,
-      disconnected: false 
+      disconnected: false,
+      isSpectator: false
     }));
     this.dealerIndex = 0;
     this.handNumber = 0;
     this.history = [];
-    this.startNewHand();
+    this.phase = 'WAITING'; // 等待更多玩家加入
+    this._log("等待玩家加入...");
+    
+    // 如果已经有足够的玩家，自动开始游戏
+    if (this.players.length >= 2) {
+      this.startNewHand();
+    }
+  }
+  
+  // ── Add Player (during WAITING or after hand ends) ───────────
+  
+  addPlayer(user) {
+    // 检查是否已存在
+    if (this.players.find(p => p.id === user.id)) return false;
+    if (this.players.length >= this.maxPlayers) return false;
+    
+    const playerChips = user.chips || 0;
+    const playerName = user.name || user.username;
+    
+    this.players.push({
+      id: user.id,
+      name: playerName,
+      picture: user.picture,
+      chips: playerChips,
+      holeCards: [],
+      bet: 0,
+      totalBet: 1,
+      folded: false,
+      allIn: false,
+      isDealer: false,
+      isActive: playerChips >= 1,
+      disconnected: false,
+      isSpectator: false
+    });
+    
+    this._log(`${playerName} 加入桌子 (筹码: ${playerChips})`);
+    
+    // 如果游戏在等待状态且人数够了，自动开始
+    if (this.phase === 'WAITING' && this.players.length >= 2) {
+      this.startNewHand();
+    }
+    
+    return true;
+  }
+  
+  // ── Remove Player (when disconnected) ────────────────────────
+  
+  removePlayer(userId) {
+    const idx = this.players.findIndex(p => p.id === userId);
+    if (idx === -1) return false;
+    
+    const player = this.players[idx];
+    this._log(`${player.name} 离开了桌子`);
+    
+    // 从数组中移除
+    this.players.splice(idx, 1);
+    
+    // 调整当前玩家索引
+    if (this.currentPlayerIndex >= idx && this.currentPlayerIndex > 0) {
+      this.currentPlayerIndex--;
+    }
+    if (this.roundInitiator >= idx && this.roundInitiator > 0) {
+      this.roundInitiator--;
+    }
+    if (this.dealerIndex >= idx && this.dealerIndex > 0) {
+      this.dealerIndex--;
+    }
+    
+    return true;
+  }
+  
+  // ── Add Spectator ───────────────────────────────────────────
+  
+  addSpectator(userId) {
+    if (!this.spectators.includes(userId)) {
+      this.spectators.push(userId);
+    }
+  }
+  
+  removeSpectator(userId) {
+    this.spectators = this.spectators.filter(id => id !== userId);
   }
 
   // ── New Hand ────────────────────────────────────────────────
@@ -63,6 +156,7 @@ class GameEngine {
     this.handNumber++;
     this.currentHandLog = [];
     this.readyForNext.clear();
+    this.clearReadyTimer();
 
     // Reset player states
     for (const p of this.players) {
@@ -71,15 +165,16 @@ class GameEngine {
       p.totalBet = 0;
       p.folded = false;
       p.allIn = false;
+      p.isSpectator = false;
       if (p.chips <= 0) {
-        p.isActive = false; // Could auto-rebuy or kick out
+        p.isActive = false;
       }
     }
 
     // Check if enough active players
     const activePlayers = this.players.filter(p => p.isActive && !p.disconnected);
     if (activePlayers.length < 2) {
-      this.phase = 'FINISHED';
+      this.phase = 'WAITING';
       this._log("等待更多玩家加入...");
       return;
     }
@@ -137,6 +232,56 @@ class GameEngine {
     if (p.chips === 0) p.allIn = true;
   }
 
+  // ── Timer Management ────────────────────────────────────────
+
+  setOnTimeoutCallback(callback) {
+    this.onTimeoutCallback = callback;
+  }
+
+  startTurnTimer() {
+    this.clearTurnTimer();
+    this.turnStartTime = Date.now();
+    
+    this.turnTimer = setTimeout(() => {
+      this._handleTimeout();
+    }, this.turnTimeout * 1000);
+  }
+
+  clearTurnTimer() {
+    if (this.turnTimer) {
+      clearTimeout(this.turnTimer);
+      this.turnTimer = null;
+    }
+    this.turnStartTime = null;
+  }
+
+  getRemainingTime() {
+    if (!this.turnStartTime) return this.turnTimeout;
+    const elapsed = Math.floor((Date.now() - this.turnStartTime) / 1000);
+    return Math.max(0, this.turnTimeout - elapsed);
+  }
+
+  _handleTimeout() {
+    const player = this.players[this.currentPlayerIndex];
+    if (!player || this.phase === 'SHOWDOWN' || this.phase === 'FINISHED' || this.phase === 'WAITING') {
+      return;
+    }
+
+    this._log(`${player.name} 超时`);
+
+    // 判断是否可以过牌
+    const canCheck = player.bet >= this.currentBet;
+    const autoAction = canCheck ? 'check' : 'fold';
+    
+    // 执行自动操作
+    const result = this._executeAction(this.currentPlayerIndex, autoAction);
+    
+    // 通知回调
+    if (this.onTimeoutCallback) {
+      this.onTimeoutCallback(player.id, autoAction, result);
+    }
+  }
+
   // ── Connection / Disconnection ──────────────────────────────
 
   handleDisconnect(userId) {
@@ -146,7 +291,7 @@ class GameEngine {
       this._log(`${p.name} 掉线`);
       
       // Auto fold if it's their turn or they are non-folded
-      if (!p.folded && this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED') {
+      if (!p.folded && this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED' && this.phase !== 'WAITING') {
          this.performAction(userId, 'fold');
       }
     }
@@ -163,12 +308,16 @@ class GameEngine {
     if (this.phase === 'WAITING' || this.phase === 'SHOWDOWN' || this.phase === 'FINISHED') {
       return { error: `当前阶段(${this.phase})不能操作` };
     }
+    
+    // 玩家操作时清除计时器
+    this.clearTurnTimer();
 
     return this._executeAction(this.currentPlayerIndex, action, amount);
   }
 
   _executeAction(playerIndex, action, amount = 0) {
     const player = this.players[playerIndex];
+    const userId = player.id;
 
     switch (action) {
       case 'fold':
@@ -242,7 +391,7 @@ class GameEngine {
       if (activePlayers.length === 1) {
         this._winByFold(activePlayers[0]);
       } else {
-         this.phase = 'FINISHED'; // Everyone folded / disconnected
+         this.phase = 'FINISHED';
       }
       return this.getState(userId);
     }
@@ -272,6 +421,9 @@ class GameEngine {
     }
 
     this.currentPlayerIndex = next;
+    
+    // 启动新回合计时器
+    this.startTurnTimer();
   }
 
   _hasEveryoneActed() {
@@ -302,12 +454,15 @@ class GameEngine {
       idx = (idx + 1) % this.players.length;
       count++;
     }
-    return -1; // No more players can act
+    return -1;
   }
 
   // ── Phase Progression ───────────────────────────────────────
 
   _advancePhase() {
+    // 清除当前计时器
+    this.clearTurnTimer();
+    
     // Reset bets for next round
     for (const p of this.players) {
       p.bet = 0;
@@ -348,6 +503,9 @@ class GameEngine {
       return;
     }
     this.roundInitiator = this.currentPlayerIndex;
+    
+    // 启动新阶段计时器
+    this.startTurnTimer();
   }
 
   _runOutBoard() {
@@ -376,7 +534,17 @@ class GameEngine {
         best,
         totalBet: p.totalBet
       });
-      this._log(`${p.name}: ${best.name} (${p.holeCards.map(cardToString).join(' ')})`);
+      
+      // 显示更详细的牌型信息
+      let handDetail = best.name;
+      if (best.scores && best.scores.length > 0) {
+        if (best.rank === 4) { // 顺子
+          const highCard = best.scores[0];
+          const highNames = { 14: 'A', 13: 'K', 12: 'Q', 11: 'J', 10: '10', 9: '9', 8: '8', 7: '7', 6: '6', 5: '5' };
+          handDetail = `${best.name} (${highNames[highCard] || highCard}高)`;
+        }
+      }
+      this._log(`${p.name}: ${handDetail} (${p.holeCards.map(cardToString).join(' ')})`);
     }
 
     results.sort((a, b) => compareHands(b.best, a.best));
@@ -423,17 +591,27 @@ class GameEngine {
       );
 
       if (eligibleResults.length > 0) {
-        const bestHand = eligibleResults[0].best;
-        const winners = eligibleResults.filter(r => compareHands(r.best, bestHand) === 0);
-        const share = Math.floor(potPortion / winners.length);
-
-        for (const w of winners) {
+        // 如果只有一个有资格的玩家，这部分筹码退还给他（边池退还）
+        if (eligibleResults.length === 1) {
+          const w = eligibleResults[0];
           const wObj = this.players.find(x => x.id === w.playerId);
-          wObj.chips += share;
-          w.won = (w.won || 0) + share;
-          this._log(`${w.playerName} 赢得 ${share} 筹码`);
+          wObj.chips += potPortion;
+          w.won = (w.won || 0) + potPortion;
+          this._log(`${w.playerName} 收回边池 ${potPortion} 筹码`);
+        } else {
+          // 多个玩家竞争，比较牌面
+          const bestHand = eligibleResults[0].best;
+          const winners = eligibleResults.filter(r => compareHands(r.best, bestHand) === 0);
+          const share = Math.floor(potPortion / winners.length);
+
+          for (const w of winners) {
+            const wObj = this.players.find(x => x.id === w.playerId);
+            wObj.chips += share;
+            w.won = (w.won || 0) + share;
+            this._log(`${w.playerName} 赢得 ${share} 筹码`);
+          }
         }
-        remainingPot -= share * winners.length;
+        remainingPot -= potPortion;
       }
 
       prevBet = betLevel;
@@ -473,12 +651,64 @@ class GameEngine {
   // ── Multiplayer Turn coordination ───────────────────────────
 
   playerRequestedNextHand(userId) {
-    this.readyForNext.add(userId);
-    const activePlayers = this.players.filter(p => !p.disconnected);
-    if (this.readyForNext.size >= activePlayers.length) {
-      return { ready: true };
+    // 如果已经开始新一手，不再处理准备请求
+    if (this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED') {
+      return { ready: false, count: 0, total: 0, error: '当前阶段不能准备' };
     }
-    return { ready: false, count: this.readyForNext.size, total: activePlayers.length };
+    
+    this.readyForNext.add(userId);
+    const activePlayers = this.players.filter(p => !p.disconnected && p.chips > 0);
+    const count = this.readyForNext.size;
+    const total = activePlayers.length;
+    
+    // 只计算活跃玩家的准备数量
+    const readyActiveCount = activePlayers.filter(p => this.readyForNext.has(p.id)).length;
+    
+    if (readyActiveCount >= activePlayers.length) {
+      this.clearReadyTimer();
+      return { ready: true, count: readyActiveCount, total };
+    }
+    return { ready: false, count: readyActiveCount, total };
+  }
+
+  startReadyTimer() {
+    this.clearReadyTimer();
+    this.readyStartTime = Date.now();
+    
+    this.readyTimer = setTimeout(() => {
+      this._handleReadyTimeout();
+    }, this.readyTimeout * 1000);
+  }
+
+  clearReadyTimer() {
+    if (this.readyTimer) {
+      clearTimeout(this.readyTimer);
+      this.readyTimer = null;
+    }
+    this.readyStartTime = null;
+  }
+
+  getReadyRemainingTime() {
+    if (!this.readyStartTime) return this.readyTimeout;
+    const elapsed = Math.floor((Date.now() - this.readyStartTime) / 1000);
+    return Math.max(0, this.readyTimeout - elapsed);
+  }
+
+  _handleReadyTimeout() {
+    const activePlayers = this.players.filter(p => !p.disconnected && p.chips > 0);
+    const notReadyPlayers = activePlayers.filter(p => !this.readyForNext.has(p.id));
+    
+    if (notReadyPlayers.length > 0) {
+      this._log(`准备超时，以下玩家将被移除: ${notReadyPlayers.map(p => p.name).join(', ')}`);
+      
+      if (this.onReadyTimeoutCallback) {
+        this.onReadyTimeoutCallback(notReadyPlayers.map(p => p.id));
+      }
+    }
+  }
+
+  setOnReadyTimeoutCallback(callback) {
+    this.onReadyTimeoutCallback = callback;
   }
 
   nextHand() {
@@ -486,15 +716,24 @@ class GameEngine {
       return { error: '当前手牌尚未结束' };
     }
 
-    // basic rebuy for busted players
+    // 筹码不足的玩家标记为不活跃
+    const bustedPlayers = [];
     for (const p of this.players) {
       if (p.chips <= 0) {
-        p.chips = 1000;
-        p.isActive = true;
+        p.isActive = false;
+        bustedPlayers.push(p);
       }
     }
 
     this.startNewHand();
+    
+    return { bustedPlayers };
+  }
+
+  // ── History ──────────────────────────────────────────────────
+  
+  getHistory(limit = 50) {
+    return this.history.slice(-limit);
   }
 
   // ── State Getter ────────────────────────────────────────────
@@ -502,6 +741,19 @@ class GameEngine {
 
   getState(viewerUserId) {
     const isShowdown = this.phase === 'SHOWDOWN';
+    const isFinished = this.phase === 'FINISHED';
+    const isWaiting = this.phase === 'WAITING';
+    
+    // 判断查看者身份：是玩家还是观战者
+    const isPlayer = this.players.some(p => p.id === viewerUserId);
+    const isSpectator = !isPlayer && this.spectators.includes(viewerUserId);
+    
+    // 观战者看不到任何玩家的底牌，直到摊牌
+    const canSeeHoleCards = (playerId) => {
+      if (isShowdown || isFinished) return true;
+      if (playerId === viewerUserId) return true;
+      return false;
+    };
 
     return {
       phase: this.phase,
@@ -516,7 +768,14 @@ class GameEngine {
       currentPlayerIndex: this.currentPlayerIndex,
       dealerIndex: this.dealerIndex,
       lastAction: this.lastAction,
-      players: this.players.map(p => ({
+      isSpectator: isSpectator,
+      isPlayer: isPlayer,
+      maxPlayers: this.maxPlayers,
+      playerCount: this.players.length,
+      spectatorCount: this.spectators.length,
+      turnTimeout: this.turnTimeout,
+      remainingTime: this.getRemainingTime(),
+      players: this.players.map((p, idx) => ({
         id: p.id,
         name: p.name,
         picture: p.picture,
@@ -528,7 +787,9 @@ class GameEngine {
         isDealer: p.isDealer,
         isActive: p.isActive,
         disconnected: p.disconnected,
-        holeCards: (p.id === viewerUserId || isShowdown || this.phase === 'FINISHED')
+        isMe: p.id === viewerUserId,
+        originalIndex: idx,
+        holeCards: canSeeHoleCards(p.id)
           ? p.holeCards.map(c => ({ rank: c.rank, suit: c.suit, display: cardToString(c) }))
           : p.holeCards.map(() => ({ hidden: true })),
         ...(isShowdown && !p.folded && p.isActive && this.communityCards.length === 5 ? {
@@ -536,18 +797,28 @@ class GameEngine {
         } : {})
       })),
       actions: this._getAvailableActions(viewerUserId),
-      log: this.currentHandLog.slice(-10)
+      log: this.currentHandLog.slice(-10),
+      turnTimeout: this.turnTimeout,
+      remainingTime: this.getRemainingTime(),
+      readyTimeout: this.readyTimeout,
+      readyRemainingTime: (isShowdown || isFinished) ? this.getReadyRemainingTime() : null
     };
   }
 
   _getAvailableActions(userId) {
     if (this.phase === 'SHOWDOWN' || this.phase === 'FINISHED') {
-      return ['nextHand']; // Handled as game:next via socket
+      return ['nextHand'];
     }
     if (this.phase === 'WAITING') return [];
 
-    const player = this.players[this.currentPlayerIndex];
-    if (!player || player.id !== userId || player.folded || player.allIn || player.disconnected) return [];
+    const playerIdx = this.players.findIndex(p => p.id === userId);
+    if (playerIdx === -1) return []; // 观战者无操作
+    
+    const player = this.players[playerIdx];
+    if (!player || player.folded || player.allIn || player.disconnected) return [];
+    
+    // 必须是当前回合玩家才能操作
+    if (playerIdx !== this.currentPlayerIndex) return [];
 
     const actions = ['fold'];
     const callAmount = this.currentBet - player.bet;

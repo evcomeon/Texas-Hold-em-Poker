@@ -1,0 +1,59 @@
+# ============================================
+# Texas Hold'em Poker - Docker Compose (Production)
+# ============================================
+
+version: '3.8'
+
+services:
+  # Backend API Server
+  backend:
+    build:
+      context: .
+      target: backend
+    container_name: poker-backend
+    restart: unless-stopped
+    env_file:
+      - ./server/.env
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    ports:
+      - "3001:3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/api/health', (r) => r.statusCode === 200 ? process.exit(0) : process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - poker-network
+
+  # Frontend with Nginx
+  frontend:
+    build:
+      context: .
+      target: frontend-builder
+    container_name: poker-frontend-build
+    # This service is only for building, not running
+    command: echo "Build complete"
+
+  # Full Stack (Alternative: Single container with Nginx + Backend)
+  fullstack:
+    build:
+      context: .
+      target: fullstack
+    container_name: poker-fullstack
+    restart: unless-stopped
+    env_file:
+      - ./server/.env
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    ports:
+      - "80:80"
+    networks:
+      - poker-network
+
+networks:
+  poker-network:
+    driver: bridge

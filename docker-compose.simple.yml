@@ -1,0 +1,28 @@
+# ============================================
+# Texas Hold'em Poker - Simple Docker Compose
+# Single container deployment (Nginx + Backend)
+# ============================================
+
+version: '3.8'
+
+services:
+  poker:
+    build:
+      context: .
+      target: fullstack
+    container_name: texas-holdem-poker
+    restart: unless-stopped
+    env_file:
+      - ./server/.env
+    ports:
+      - "80:80"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      # Set your JWT secret here or in .env file
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
