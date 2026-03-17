@@ -349,11 +349,62 @@ class LobbyManager {
   // 开始新的一手牌，将观战者转为玩家
   async startNewHandWithSpectators(roomId, stakeConfig) {
     const room = this.activeGames.get(roomId);
-    if (!room) return;
+    if (!room) return { canStart: false };
     
     const minChips = stakeConfig ? stakeConfig.bigBlind : 10;
     
-    // 将有足够筹码的观战者转为玩家（如果还有空位）
+    // 1. 先处理输光筹码的玩家，将他们转为观战者
+    const bustedPlayers = [];
+    const activePlayers = [];
+    for (const player of room.players) {
+      // 从数据库获取最新筹码
+      try {
+        const dbUser = await UserModel.findById(player.id);
+        if (dbUser) {
+          player.chips = dbUser.chips_balance;
+        }
+      } catch (e) {
+        console.error('Failed to fetch player chips:', e);
+      }
+      
+      if (player.chips < minChips) {
+        // 筹码不足，转为观战者
+        bustedPlayers.push(player);
+        room.engine.removePlayer(player.id);
+        room.engine.addSpectator(player.id);
+        
+        // 更新状态
+        for (const [sId, data] of this.connectedUsers.entries()) {
+          if (data.user.id === player.id) {
+            data.isSpectator = true;
+            break;
+          }
+        }
+        
+        // 通知该玩家筹码不足
+        const bustedSocket = this.getSocketByUserId(player.id);
+        if (bustedSocket) {
+          bustedSocket.emit('game:busted', {
+            message: '您的筹码不足，无法继续游戏，请充值后继续',
+            currentChips: player.chips || 0
+          });
+        }
+      } else {
+        activePlayers.push(player);
+      }
+    }
+    
+    // 更新房间玩家列表（移除筹码不足的玩家）
+    room.players = activePlayers;
+    
+    // 将筹码不足的玩家加入观战者列表
+    for (const busted of bustedPlayers) {
+      if (!room.spectators.includes(busted.id)) {
+        room.spectators.push(busted.id);
+      }
+    }
+    
+    // 2. 将有足够筹码的观战者转为玩家（如果还有空位）
     const stillSpectators = [];
     while (room.spectators.length > 0 && room.players.length < this.MAX_PLAYERS) {
       const specId = room.spectators.shift();
@@ -402,6 +453,16 @@ class LobbyManager {
     
     // 恢复筹码不足的观战者
     room.spectators.push(...stillSpectators);
+    
+    this._log(`新一手牌开始: ${room.players.length} 名玩家, ${room.spectators.length} 名观战者`);
+    
+    // 检查是否有足够的玩家继续游戏
+    if (room.players.length < 2) {
+      this._log(`玩家不足 (${room.players.length}/2)，无法继续游戏`);
+      return { canStart: false, playerCount: room.players.length };
+    }
+    
+    return { canStart: true, playerCount: room.players.length };
   }
   
   // 处理玩家超时

@@ -224,42 +224,25 @@ function configureSockets(server) {
         // 获取盲注配置
         const stakeConfig = lobby.getStakeLevels()[room.stakeLevel || 'medium'];
         
-        // 先将观战者转为玩家
-        await lobby.startNewHandWithSpectators(roomId, stakeConfig);
+        // 处理玩家和观战者的匹配（包括输光筹码的玩家转为观战者，有足够筹码的观战者转为玩家）
+        const matchResult = await lobby.startNewHandWithSpectators(roomId, stakeConfig);
+        
+        // 检查是否有足够的玩家继续游戏
+        if (!matchResult || !matchResult.canStart) {
+          // 玩家不足，通知所有人游戏结束
+          engine.phase = 'FINISHED';
+          await broadcastToRoom(io, roomId, room, lobby, 'game:notification', {
+            msg: '玩家不足，游戏结束。请充值后继续游戏。'
+          });
+          await broadcastToRoom(io, roomId, room, lobby);
+          return;
+        }
         
         // 重置筹码保存标志
         room.chipsSaved = false;
         
         // 开始新一手牌
-        const nextResult = engine.nextHand();
-        
-        // 处理输光筹码的玩家
-        if (nextResult && nextResult.bustedPlayers && nextResult.bustedPlayers.length > 0) {
-          for (const bustedPlayer of nextResult.bustedPlayers) {
-            // 将玩家转为观战者
-            if (!room.spectators.includes(bustedPlayer.id)) {
-              room.spectators.push(bustedPlayer.id);
-              engine.addSpectator(bustedPlayer.id);
-            }
-            
-            // 更新用户状态为观战者
-            for (const [sId, data] of lobby.connectedUsers.entries()) {
-              if (data.user.id === bustedPlayer.id) {
-                data.isSpectator = true;
-                break;
-              }
-            }
-            
-            // 通知该玩家筹码不足
-            const bustedSocket = lobby.getSocketByUserId(bustedPlayer.id);
-            if (bustedSocket) {
-              bustedSocket.emit('game:busted', {
-                message: '您的筹码已用完，请充值后继续游戏',
-                currentChips: 0
-              });
-            }
-          }
-        }
+        engine.nextHand();
         
         // 广播新状态
         await broadcastToRoom(io, roomId, room, lobby);

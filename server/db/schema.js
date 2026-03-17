@@ -75,10 +75,14 @@ async function initializeDatabase() {
       description VARCHAR(255),
       payment_method VARCHAR(50),
       payment_id VARCHAR(255),
+      idempotency_key VARCHAR(64) UNIQUE,  -- FIX: 幂等性键
       status VARCHAR(20) DEFAULT 'completed',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  
+  // FIX: 创建幂等性键索引
+  await query(`CREATE INDEX IF NOT EXISTS idx_transactions_idempotency_key ON transactions(idempotency_key) WHERE idempotency_key IS NOT NULL;`);
 
   // 创建索引
   await query(`CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);`);

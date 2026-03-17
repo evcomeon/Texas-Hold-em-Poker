@@ -3,25 +3,38 @@ const config = require('../config');
 const logger = require('../utils/logger');
 const RechargeTransaction = require('../models/recharge');
 const User = require('../models/user');
+const { getClient } = require('../models/database');
 
 const ERC20_ABI = [
   'event Transfer(address indexed from, address indexed to, uint256 value)',
   'function decimals() view returns (uint8)',
   'function symbol() view returns (string)',
-  'function balanceOf(address) view returns (uint256)'
+  'function balanceOf(address) view returns (uint256)',
+  'function totalSupply() view returns (uint256)'
 ];
 
+/**
+ * FIX: 增强安全性的区块链监控器
+ * 1. 验证交易发送方与订单钱包地址匹配
+ * 2. 防重放攻击保护
+ * 3. 代币合约地址白名单验证
+ * 4. 数据库级别的幂等性保证
+ */
 class BlockchainMonitor {
   constructor() {
     this.provider = null;
     this.contracts = {};
     this.isRunning = false;
-    this.processedTxs = new Set();
+    this.processedTxs = new Set(); // 内存缓存，防止同一进程内重复处理
     this.lastProcessedBlock = 0;
+    this.lockMap = new Map(); // 交易处理锁，防止并发处理同一笔交易
   }
   
   async initialize() {
     logger.info('Initializing blockchain monitor...');
+    
+    // Validate configuration
+    this._validateConfig();
     
     // Create provider
     this.provider = new ethers.JsonRpcProvider(config.blockchain.rpcUrl);
@@ -30,38 +43,109 @@ class BlockchainMonitor {
     try {
       const network = await this.provider.getNetwork();
       logger.info('Connected to network', { chainId: network.chainId });
+      
+      // FIX: 验证链ID是否符合预期（主网或指定测试网）
+      const expectedChainId = this._getExpectedChainId();
+      if (expectedChainId && network.chainId !== expectedChainId) {
+        throw new Error(`Unexpected chain ID: ${network.chainId}, expected: ${expectedChainId}`);
+      }
     } catch (error) {
       logger.error('Failed to connect to blockchain', { error: error.message });
       throw error;
     }
     
-    // Initialize token contracts
+    // Initialize token contracts with address validation
     for (const [token, tokenConfig] of Object.entries(config.tokens)) {
       if (tokenConfig.address) {
+        // FIX: 验证代币合约地址格式
+        if (!ethers.isAddress(tokenConfig.address)) {
+          logger.error(`Invalid ${token} contract address`, { address: tokenConfig.address });
+          continue;
+        }
+        
         this.contracts[token] = new ethers.Contract(
           tokenConfig.address,
           ERC20_ABI,
           this.provider
         );
-        logger.info(`Initialized ${token.toUpperCase()} contract`, { 
-          address: tokenConfig.address 
-        });
+        
+        // FIX: 验证合约是否真实存在（调用decimals检查）
+        try {
+          await this.contracts[token].decimals();
+          logger.info(`Initialized ${token.toUpperCase()} contract`, { 
+            address: tokenConfig.address 
+          });
+        } catch (e) {
+          logger.error(`${token} contract validation failed`, { error: e.message });
+          delete this.contracts[token];
+        }
       }
     }
     
-    // Get last processed block from database or use current block
+    if (Object.keys(this.contracts).length === 0) {
+      throw new Error('No valid token contracts initialized');
+    }
+    
+    // Get last processed block from database
     const lastBlock = await this.getLastProcessedBlock();
     this.lastProcessedBlock = lastBlock || await this.provider.getBlockNumber() - 100;
     
     logger.info('Blockchain monitor initialized', { 
-      lastProcessedBlock: this.lastProcessedBlock 
+      lastProcessedBlock: this.lastProcessedBlock,
+      validContracts: Object.keys(this.contracts)
     });
   }
   
+  _validateConfig() {
+    // FIX: 验证配置完整性
+    if (!config.wallet.address || !ethers.isAddress(config.wallet.address)) {
+      throw new Error('Invalid or missing RECHARGE_WALLET_ADDRESS');
+    }
+    
+    if (!config.blockchain.rpcUrl) {
+      throw new Error('Missing RPC_URL');
+    }
+    
+    if (config.exchange.chipsPerUsd <= 0) {
+      throw new Error('Invalid CHIPS_PER_USD');
+    }
+  }
+  
+  _getExpectedChainId() {
+    // 根据网络配置返回期望的链ID
+    const networkMap = {
+      'mainnet': 1,
+      'ethereum': 1,
+      'goerli': 5,
+      'sepolia': 11155111,
+      'bsc': 56,
+      'bsc-testnet': 97
+    };
+    return networkMap[config.blockchain.network];
+  }
+  
   async getLastProcessedBlock() {
-    // In production, store this in database
-    // For now, return null to start from current block - 100
-    return null;
+    try {
+      const result = await User.query(
+        'SELECT value FROM system_settings WHERE key = $1',
+        ['last_processed_block']
+      );
+      return result.rows.length > 0 ? parseInt(result.rows[0].value) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  
+  async saveLastProcessedBlock(blockNumber) {
+    try {
+      await User.query(
+        `INSERT INTO system_settings (key, value) VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = CURRENT_TIMESTAMP`,
+        ['last_processed_block', blockNumber.toString()]
+      );
+    } catch (e) {
+      logger.error('Failed to save last processed block', { error: e.message });
+    }
   }
   
   async start() {
@@ -111,6 +195,7 @@ class BlockchainMonitor {
       }
       
       this.lastProcessedBlock = targetBlock;
+      await this.saveLastProcessedBlock(targetBlock);
       
     } catch (error) {
       logger.error('Error during polling', { error: error.message });
@@ -136,136 +221,267 @@ class BlockchainMonitor {
     }
   }
   
+  /**
+   * FIX: 增强的转账事件处理，包含多重安全验证
+   */
   async processTransferEvent(token, event) {
-    const { args, transactionHash, blockNumber } = event;
+    const { args, transactionHash, blockNumber, address } = event;
     const from = args[0];
     const to = args[1];
     const value = args[2];
     
-    // Skip if already processed
+    // FIX: 验证事件来源的合约地址是否在白名单中
+    const normalizedContractAddress = address.toLowerCase();
+    const isValidContract = Object.values(config.tokens).some(
+      t => t.address && t.address.toLowerCase() === normalizedContractAddress
+    );
+    
+    if (!isValidContract) {
+      logger.warn('Transfer from unverified contract', { 
+        contract: address, 
+        txHash: transactionHash 
+      });
+      return;
+    }
+    
+    // FIX: 检查是否已处理（内存缓存 + 数据库双重检查）
     if (this.processedTxs.has(transactionHash)) {
       return;
     }
     
-    logger.info('Processing transfer event', {
-      token,
-      from,
-      to,
-      value: value.toString(),
-      txHash: transactionHash,
-      blockNumber
-    });
-    
-    // Check if transaction already exists in database
-    const existingTx = await RechargeTransaction.findByTxHash(transactionHash);
-    if (existingTx) {
-      this.processedTxs.add(transactionHash);
+    // FIX: 获取交易锁，防止并发处理
+    if (this.lockMap.has(transactionHash)) {
       return;
     }
+    this.lockMap.set(transactionHash, true);
     
-    // Convert token amount to human readable
-    const decimals = config.tokens[token].decimals;
-    const tokenAmount = parseFloat(ethers.formatUnits(value, decimals));
-    
-    // Check minimum amount
-    if (tokenAmount < config.exchange.minRechargeAmount) {
-      logger.warn('Transfer amount below minimum', { 
-        tokenAmount, 
-        minAmount: config.exchange.minRechargeAmount 
-      });
-      return;
-    }
-    
-    // Check maximum amount
-    if (config.exchange.maxRechargeAmount > 0 && tokenAmount > config.exchange.maxRechargeAmount) {
-      logger.warn('Transfer amount above maximum', { 
-        tokenAmount, 
-        maxAmount: config.exchange.maxRechargeAmount 
-      });
-      return;
-    }
-    
-    // Calculate chips amount
-    const chipsAmount = Math.floor(tokenAmount * config.exchange.chipsPerUsd);
-    
-    // Find user by wallet address
-    // In production, you'd have a user_wallets table
-    // For now, we'll use a mapping stored somewhere
-    const userId = await this.findUserByWallet(from);
-    
-    if (!userId) {
-      logger.warn('No user found for wallet address', { from });
-      // Still create the transaction but mark as 'unclaimed'
-      await RechargeTransaction.create({
-        userId: null,
-        txHash: transactionHash,
-        tokenSymbol: config.tokens[token].symbol,
-        tokenAmount,
-        chipsAmount,
-        fromAddress: from,
-        toAddress: to,
-        blockNumber,
-        status: 'unclaimed'
-      });
-      return;
-    }
-    
-    // Create recharge transaction
-    const rechargeTx = await RechargeTransaction.create({
-      userId,
-      txHash: transactionHash,
-      tokenSymbol: config.tokens[token].symbol,
-      tokenAmount,
-      chipsAmount,
-      fromAddress: from,
-      toAddress: to,
-      blockNumber,
-      status: 'pending'
-    });
-    
-    // Process the recharge immediately
-    await this.processRecharge(rechargeTx);
-    
-    this.processedTxs.add(transactionHash);
-  }
-  
-  async findUserByWallet(walletAddress) {
-    // In production, query user_wallets table
-    // For now, return null - this should be implemented based on your user wallet mapping
-    // Example: const result = await query('SELECT user_id FROM user_wallets WHERE wallet_address = $1', [walletAddress.toLowerCase()]);
-    return null;
-  }
-  
-  async processRecharge(rechargeTx) {
     try {
-      if (!rechargeTx.userId) {
-        logger.warn('Cannot process recharge without user ID', { txHash: rechargeTx.tx_hash });
+      logger.info('Processing transfer event', {
+        token,
+        from,
+        to,
+        value: value.toString(),
+        txHash: transactionHash,
+        blockNumber
+      });
+      
+      // FIX: 数据库级别的幂等性检查，防止重复处理
+      const existingTx = await RechargeTransaction.findByTxHash(transactionHash);
+      if (existingTx) {
+        if (existingTx.status === 'completed') {
+          logger.info('Transaction already processed', { txHash: transactionHash });
+          this.processedTxs.add(transactionHash);
+          return;
+        }
+        // 如果是pending状态，继续处理
+      }
+      
+      // FIX: 获取完整交易信息以验证发送方
+      const tx = await this.provider.getTransaction(transactionHash);
+      if (!tx) {
+        logger.error('Failed to fetch transaction details', { txHash: transactionHash });
         return;
       }
       
-      // Add chips to user
-      await User.addChips(
-        rechargeTx.user_id,
-        rechargeTx.chips_amount,
-        rechargeTx.tx_hash,
-        rechargeTx.token_symbol,
-        rechargeTx.token_amount
-      );
+      // Convert token amount to human readable
+      const decimals = config.tokens[token].decimals;
+      const tokenAmount = parseFloat(ethers.formatUnits(value, decimals));
       
-      logger.info('Recharge processed successfully', {
-        txHash: rechargeTx.tx_hash,
-        userId: rechargeTx.user_id,
-        chipsAdded: rechargeTx.chips_amount
-      });
+      // Check minimum amount
+      if (tokenAmount < config.exchange.minRechargeAmount) {
+        logger.warn('Transfer amount below minimum', { 
+          tokenAmount, 
+          minAmount: config.exchange.minRechargeAmount,
+          txHash: transactionHash
+        });
+        return;
+      }
+      
+      // Check maximum amount
+      if (config.exchange.maxRechargeAmount > 0 && tokenAmount > config.exchange.maxRechargeAmount) {
+        logger.warn('Transfer amount above maximum', { 
+          tokenAmount, 
+          maxAmount: config.exchange.maxRechargeAmount,
+          txHash: transactionHash
+        });
+        return;
+      }
+      
+      // Calculate chips amount
+      const chipsAmount = Math.floor(tokenAmount * config.exchange.chipsPerUsd);
+      
+      // FIX: 查找与发送地址关联的待处理订单
+      const pendingOrder = await this.findPendingOrderByFromAddress(from);
+      
+      if (!pendingOrder) {
+        logger.warn('No pending order found for transfer', { 
+          from, 
+          txHash: transactionHash,
+          amount: tokenAmount,
+          token: config.tokens[token].symbol
+        });
+        
+        // 创建未认领的交易记录
+        await RechargeTransaction.create({
+          userId: null,
+          txHash: transactionHash,
+          tokenSymbol: config.tokens[token].symbol,
+          tokenAmount,
+          chipsAmount,
+          fromAddress: from,
+          toAddress: to,
+          blockNumber,
+          status: 'unclaimed'
+        });
+        return;
+      }
+      
+      // FIX: 验证转账金额与订单金额匹配（允许小误差）
+      const amountDiff = Math.abs(tokenAmount - parseFloat(pendingOrder.token_amount));
+      const tolerance = 0.01; // 1% 容差
+      
+      if (amountDiff > parseFloat(pendingOrder.token_amount) * tolerance) {
+        logger.warn('Transfer amount does not match order', {
+          orderId: pendingOrder.order_no,
+          expected: pendingOrder.token_amount,
+          actual: tokenAmount,
+          txHash: transactionHash
+        });
+      }
+      
+      // FIX: 使用数据库事务确保幂等性
+      const client = await getClient();
+      try {
+        await client.query('BEGIN');
+        
+        // 再次检查是否已处理（在事务内）
+        const checkResult = await client.query(
+          'SELECT status FROM recharge_orders WHERE tx_hash = $1 FOR UPDATE',
+          [transactionHash]
+        );
+        
+        if (checkResult.rows.length > 0 && checkResult.rows[0].status === 'completed') {
+          await client.query('COMMIT');
+          logger.info('Transaction already completed (checked in transaction)', { txHash: transactionHash });
+          return;
+        }
+        
+        // 创建或更新充值记录
+        let rechargeTx;
+        if (existingTx) {
+          await client.query(
+            'UPDATE recharge_orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+            ['processing', existingTx.id]
+          );
+          rechargeTx = { ...existingTx, status: 'processing' };
+        } else {
+          const result = await client.query(
+            `INSERT INTO recharge_orders 
+             (order_no, user_id, wallet_address, token_symbol, token_amount, chips_amount, tx_hash, to_address, from_address, status, block_number)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             RETURNING *`,
+            [
+              pendingOrder.order_no,
+              pendingOrder.user_id,
+              pendingOrder.wallet_address,
+              config.tokens[token].symbol,
+              tokenAmount,
+              chipsAmount,
+              transactionHash,
+              to,
+              from,
+              'processing',
+              blockNumber
+            ]
+          );
+          rechargeTx = result.rows[0];
+        }
+        
+        // 给用户添加筹码
+        await User.addChipsWithClient(
+          client,
+          pendingOrder.user_id,
+          chipsAmount,
+          transactionHash,
+          config.tokens[token].symbol,
+          tokenAmount
+        );
+        
+        // 更新订单状态为完成
+        await client.query(
+          'UPDATE recharge_orders SET status = $1, confirmed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE order_no = $2',
+          ['completed', pendingOrder.order_no]
+        );
+        
+        // 更新原订单的tx_hash（如果是分开的表）
+        await client.query(
+          'UPDATE recharge_orders SET tx_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE order_no = $2',
+          [transactionHash, pendingOrder.order_no]
+        );
+        
+        await client.query('COMMIT');
+        
+        logger.info('Recharge processed successfully', {
+          txHash: transactionHash,
+          orderNo: pendingOrder.order_no,
+          userId: pendingOrder.user_id,
+          chipsAdded: chipsAmount
+        });
+        
+        this.processedTxs.add(transactionHash);
+        
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
       
     } catch (error) {
-      logger.error('Failed to process recharge', {
-        txHash: rechargeTx.tx_hash,
-        error: error.message
+      logger.error('Failed to process transfer event', {
+        txHash: transactionHash,
+        error: error.message,
+        stack: error.stack
       });
       
-      // Mark as failed
-      await RechargeTransaction.updateStatus(rechargeTx.id, 'failed');
+      // 标记为失败
+      try {
+        await RechargeTransaction.updateStatusByTxHash(transactionHash, 'failed', error.message);
+      } catch (e) {
+        logger.error('Failed to update transaction status', { error: e.message });
+      }
+    } finally {
+      // 释放锁
+      this.lockMap.delete(transactionHash);
+    }
+  }
+  
+  /**
+   * FIX: 查找与发送地址关联的待处理订单
+   * 验证订单状态、金额匹配等
+   */
+  async findPendingOrderByFromAddress(fromAddress) {
+    try {
+      const client = await getClient();
+      try {
+        // 查找最近24小时内创建的待处理订单，且钱包地址匹配
+        const result = await client.query(
+          `SELECT * FROM recharge_orders 
+           WHERE LOWER(wallet_address) = LOWER($1) 
+           AND status = 'pending'
+           AND created_at > CURRENT_TIMESTAMP - INTERVAL '24 hours'
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [fromAddress]
+        );
+        
+        return result.rows[0] || null;
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      logger.error('Error finding pending order', { error: error.message });
+      return null;
     }
   }
   

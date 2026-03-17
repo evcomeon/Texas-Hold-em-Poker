@@ -1,5 +1,6 @@
 // ============================================================
 // Texas Hold'em Poker - Multiplayer Game Engine (支持观战)
+// Fix: 修复边池计算逻辑，确保多全下场景分配正确
 // ============================================================
 
 const { createDeck, shuffle, cardToString } = require('./deck');
@@ -14,7 +15,7 @@ class GameEngine {
     this.deck = [];
     this.communityCards = [];
     this.pot = 0;
-    this.sidePots = [];
+    this.sidePots = []; // 边池列表 { amount, eligiblePlayerIds }
     this.phase = 'WAITING';
     this.dealerIndex = 0;
     this.currentPlayerIndex = 0;
@@ -93,11 +94,11 @@ class GameEngine {
       chips: playerChips,
       holeCards: [],
       bet: 0,
-      totalBet: 1,
+      totalBet: 0,
       folded: false,
       allIn: false,
       isDealer: false,
-      isActive: playerChips >= 1,
+      isActive: playerChips >= this.bigBlind, // FIX: 需要至少大盲注才能参与
       disconnected: false,
       isSpectator: false
     });
@@ -187,7 +188,7 @@ class GameEngine {
     this.deck = shuffle(createDeck());
     this.communityCards = [];
     this.pot = 0;
-    this.sidePots = [];
+    this.sidePots = []; // FIX: 重置边池
     this.currentBet = 0;
     this.lastAction = null;
 
@@ -548,7 +549,10 @@ class GameEngine {
     }
 
     results.sort((a, b) => compareHands(b.best, a.best));
-    this._distributePot(results);
+    
+    // FIX: 使用正确的边池计算方法
+    this._calculateSidePots();
+    this._distributePotWithSidePots(results);
 
     this.history.push({
       handNumber: this.handNumber,
@@ -559,6 +563,7 @@ class GameEngine {
         cards: r.holeCards.map(cardToString),
         won: r.won || 0
       })),
+      sidePots: this.sidePots, // FIX: 记录边池信息
       log: [...this.currentHandLog]
     });
 
@@ -574,55 +579,94 @@ class GameEngine {
     };
   }
 
-  _distributePot(results) {
-    let remainingPot = this.pot;
-    const allBets = [...new Set(results.map(r => r.totalBet))].sort((a, b) => a - b);
+  /**
+   * FIX: 重新计算边池
+   * 根据玩家的totalBet计算所有边池
+   */
+  _calculateSidePots() {
+    this.sidePots = [];
+    
+    // 获取所有未弃牌的活跃玩家，按totalBet排序
+    const activePlayers = this.players
+      .filter(p => p.isActive && !p.folded)
+      .map(p => ({ ...p }))
+      .sort((a, b) => a.totalBet - b.totalBet);
+    
+    if (activePlayers.length === 0) return;
+    
+    let processedBet = 0;
+    
+    for (let i = 0; i < activePlayers.length; i++) {
+      const player = activePlayers[i];
+      const currentBet = player.totalBet;
+      
+      if (currentBet <= processedBet) continue;
+      
+      const betDiff = currentBet - processedBet;
+      // 所有有资格参与这个边池的玩家（下注 >= currentBet 的玩家）
+      const eligiblePlayers = activePlayers.filter(p => p.totalBet >= currentBet);
+      const potAmount = betDiff * eligiblePlayers.length;
+      
+      this.sidePots.push({
+        amount: potAmount,
+        eligiblePlayerIds: eligiblePlayers.map(p => p.id),
+        betLevel: currentBet
+      });
+      
+      processedBet = currentBet;
+    }
+    
+    // 验证总池是否正确
+    const totalSidePots = this.sidePots.reduce((sum, sp) => sum + sp.amount, 0);
+    if (totalSidePots !== this.pot) {
+      console.warn(`[Engine] Side pot calculation mismatch: ${totalSidePots} vs ${this.pot}`);
+    }
+  }
 
-    let prevBet = 0;
-    for (const betLevel of allBets) {
-      const increment = betLevel - prevBet;
-      if (increment <= 0) continue;
-
-      const eligible = this.players.filter(p => p.isActive && p.totalBet >= betLevel);
-      const potPortion = increment * eligible.length;
-
-      const eligibleResults = results.filter(r =>
-        eligible.some(p => p.id === r.playerId) && !this.players.find(x => x.id === r.playerId).folded
+  /**
+   * FIX: 使用边池分配奖金
+   * 每个边池独立计算赢家
+   */
+  _distributePotWithSidePots(results) {
+    // 按牌力排序的结果用于确定每个边池的赢家
+    const sortedResults = [...results].sort((a, b) => compareHands(b.best, a.best));
+    
+    for (const sidePot of this.sidePots) {
+      // 获取有资格参与这个边池且未弃牌的玩家
+      const eligibleResults = sortedResults.filter(r => 
+        sidePot.eligiblePlayerIds.includes(r.playerId)
       );
-
-      if (eligibleResults.length > 0) {
-        // 如果只有一个有资格的玩家，这部分筹码退还给他（边池退还）
-        if (eligibleResults.length === 1) {
-          const w = eligibleResults[0];
-          const wObj = this.players.find(x => x.id === w.playerId);
-          wObj.chips += potPortion;
-          w.won = (w.won || 0) + potPortion;
-          this._log(`${w.playerName} 收回边池 ${potPortion} 筹码`);
-        } else {
-          // 多个玩家竞争，比较牌面
-          const bestHand = eligibleResults[0].best;
-          const winners = eligibleResults.filter(r => compareHands(r.best, bestHand) === 0);
-          const share = Math.floor(potPortion / winners.length);
-
-          for (const w of winners) {
-            const wObj = this.players.find(x => x.id === w.playerId);
-            wObj.chips += share;
-            w.won = (w.won || 0) + share;
-            this._log(`${w.playerName} 赢得 ${share} 筹码`);
+      
+      if (eligibleResults.length === 0) {
+        // 如果都弃牌了，将边池给主池赢家（这在实际游戏中不应该发生）
+        console.warn(`[Engine] No eligible players for side pot of ${sidePot.amount}`);
+        continue;
+      }
+      
+      // 找出这个边池中的最高牌力
+      const bestHand = eligibleResults[0].best;
+      const winners = eligibleResults.filter(r => compareHands(r.best, bestHand) === 0);
+      
+      // 平分边池
+      const share = Math.floor(sidePot.amount / winners.length);
+      const remainder = sidePot.amount % winners.length; // 余数给第一个赢家
+      
+      for (let i = 0; i < winners.length; i++) {
+        const w = winners[i];
+        const winAmount = share + (i === 0 ? remainder : 0);
+        const wObj = this.players.find(x => x.id === w.playerId);
+        
+        if (wObj) {
+          wObj.chips += winAmount;
+          w.won = (w.won || 0) + winAmount;
+          
+          // 记录日志
+          if (this.sidePots.length === 1) {
+            this._log(`${w.playerName} 赢得主池 ${winAmount} 筹码`);
+          } else {
+            this._log(`${w.playerName} 赢得边池(${sidePot.betLevel}) ${winAmount} 筹码`);
           }
         }
-        remainingPot -= potPortion;
-      }
-
-      prevBet = betLevel;
-    }
-
-    if (remainingPot > 0 && results.length > 0) {
-      const nonFolded = results.filter(r => !this.players.find(x=>x.id === r.playerId).folded);
-      if (nonFolded.length > 0) {
-        const wObj = this.players.find(x => x.id === nonFolded[0].playerId);
-        wObj.chips += remainingPot;
-        nonFolded[0].won = (nonFolded[0].won || 0) + remainingPot;
       }
     }
   }
@@ -663,6 +707,11 @@ class GameEngine {
     
     // 只计算活跃玩家的准备数量
     const readyActiveCount = activePlayers.filter(p => this.readyForNext.has(p.id)).length;
+    
+    // 如果活跃玩家不足2人，不能开始新一局
+    if (activePlayers.length < 2) {
+      return { ready: false, count: readyActiveCount, total, error: '玩家不足，无法开始新一局' };
+    }
     
     if (readyActiveCount >= activePlayers.length) {
       this.clearReadyTimer();
@@ -759,6 +808,7 @@ class GameEngine {
       phase: this.phase,
       handNumber: this.handNumber,
       pot: this.pot,
+      sidePots: this.sidePots, // FIX: 返回边池信息
       communityCards: this.communityCards.map(c => ({
         rank: c.rank,
         suit: c.suit,
