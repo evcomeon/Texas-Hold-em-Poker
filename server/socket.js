@@ -235,8 +235,59 @@ function configureSockets(server) {
     });
 
     socket.on('lobby:leave', () => {
+      // 从匹配队列中移除
       lobby.leaveQueue(socket.user.id);
       socket.emit('lobby:left');
+    });
+
+    // ── 主动离开游戏 ─────────────────────────────────
+
+    socket.on('game:leave', async () => {
+      logger.info('socket.game_leave', {
+        socketId: socket.id,
+        userId: socket.user.id,
+      });
+
+      // 从匹配队列中也清理一下（以防万一）
+      lobby.leaveQueue(socket.user.id);
+
+      const result = lobby.leaveGame(socket.id);
+      if (!result) {
+        // 用户不在任何房间
+        socket.emit('lobby:left');
+        return;
+      }
+
+      const { roomId, room, userName, wasSpectator } = result;
+
+      // 清除 Redis 中的重连缓存（用户主动离开，不需要重连）
+      if (redisCache) {
+        try {
+          await redisCache.deleteUserGameState(socket.user.id);
+        } catch (e) {
+          logger.error('socket.clear_reconnect_cache_failed', {
+            userId: socket.user.id,
+            error: e,
+          });
+        }
+      }
+
+      // 通知房间内剩余玩家
+      if (room) {
+        const msg = wasSpectator
+          ? `${userName} 离开了观战`
+          : `${userName} 离开了牌桌`;
+
+        for (const [sId, d] of lobby.connectedUsers.entries()) {
+          if (d.roomId === roomId) {
+            d.socket.emit('game:notification', { msg });
+            d.socket.emit('game:state', room.engine.getState(d.user.id));
+          }
+        }
+      }
+
+      socket.emit('lobby:left');
+      io.emit('lobby:stats', { online: lobby.getOnlineCount() });
     });
 
     // ── Game Actions ───────────────────────────────────

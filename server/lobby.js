@@ -197,6 +197,77 @@ class LobbyManager {
     }
   }
 
+  /**
+   * 玩家主动离开游戏房间（非掉线）
+   * 与 onDisconnect 的区别：不缓存重连状态，直接清理干净
+   */
+  leaveGame(socketId) {
+    const data = this.connectedUsers.get(socketId);
+    if (!data || !data.roomId) return null;
+
+    const roomId = data.roomId;
+    const room = this.activeGames.get(roomId);
+    if (!room) {
+      // 房间已不存在，仅清理 connectedUsers
+      data.roomId = null;
+      data.isSpectator = false;
+      return null;
+    }
+
+    const userName = data.user.username || data.user.name;
+    const userId = data.user.id;
+    const wasSpectator = data.isSpectator;
+
+    if (wasSpectator) {
+      // 观战者离开
+      room.spectators = room.spectators.filter(id => id !== userId);
+      room.engine.removeSpectator(userId);
+      logger.info('lobby.spectator_left', { roomId, userId, userName });
+    } else {
+      // 玩家离开
+      const engine = room.engine;
+      const player = engine.players.find(p => p.id === userId);
+
+      if (player && !player.folded && 
+          engine.phase !== 'SHOWDOWN' && engine.phase !== 'FINISHED' && engine.phase !== 'WAITING') {
+        // 对局进行中，先自动弃牌
+        engine.performAction(userId, 'fold');
+      }
+
+      // 标记为已移除（而非掉线）
+      engine.markPlayerRemoved(userId, 'left');
+
+      // 从 readyForNext 中移除
+      engine.readyForNext.delete(userId);
+
+      logger.info('lobby.player_left_game', { roomId, userId, userName, phase: engine.phase });
+
+      // 检查剩余在线玩家
+      const connectedPlayers = engine.players.filter(
+        p => p.connectionState === 'online' && p.id !== userId
+      );
+      if (connectedPlayers.length <= 1 && 
+          engine.phase !== 'WAITING' && engine.phase !== 'FINISHED' && engine.phase !== 'SHOWDOWN') {
+        // 只剩一人，游戏无法继续（不在 showdown 阶段）
+        // 注意：showdown 阶段由 readyTimeout 处理
+        engine.phase = 'FINISHED';
+      }
+    }
+
+    // 清理该用户的房间关联
+    data.roomId = null;
+    data.isSpectator = false;
+
+    // 清理：房间空了就删除
+    const remainingPlayers = room.players.filter(p => p.connectionState !== 'removed');
+    if (remainingPlayers.length === 0 && room.spectators.length === 0) {
+      this.activeGames.delete(roomId);
+      logger.info('lobby.room_removed', { roomId, reason: 'empty' });
+    }
+
+    return { roomId, room, userName, wasSpectator };
+  }
+
   getSocketByUserId(userId) {
     for (const [sId, data] of this.connectedUsers.entries()) {
       if (data.user.id === userId) {

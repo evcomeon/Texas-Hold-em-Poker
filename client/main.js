@@ -559,7 +559,14 @@ function nextHand() {
 
 function backToLobby() {
   if (socket) {
-    socket.emit('lobby:leave');
+    socket.emit('game:leave');
+  }
+  // 清理本地游戏状态
+  gameState = null;
+  raiseMode = false;
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
   }
   showLobby();
 }
