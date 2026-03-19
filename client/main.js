@@ -2,7 +2,7 @@
 // Texas Hold'em Poker - Frontend Multiplayer Client
 // ============================================================
 
-const API = '/api';
+const API = import.meta.env.VITE_API_URL || '/api';
 
 // ── State ─────────────────────────────────────────────────────
 let gameState = null;
@@ -405,13 +405,23 @@ function hideDisconnectOverlay() {
 
 // ── WebSockets ────────────────────────────────────────────────
 function connectSocket() {
-  socket = io({
-    auth: { token },
+  // Connect to the WebSocket server using the environment variable or fallback to standard path
+  const socketAuth = { token };
+  const wsUrl = import.meta.env.VITE_WS_URL || ''; // If empty, defaults to current host (good for dev proxy)
+  
+  const socketOptions = {
+    auth: socketAuth,
     reconnection: true,
     reconnectionAttempts: 10,
     reconnectionDelay: 1000,
     reconnectionDelayMax: 5000
-  });
+  };
+
+  if (wsUrl) {
+    socket = io(wsUrl, socketOptions);
+  } else {
+    socket = io(socketOptions);
+  }
 
   socket.on('connect', () => {
     console.log('Connected to server');
@@ -448,6 +458,11 @@ function connectSocket() {
   socket.on('game:reconnected', (data) => {
     showNotification(data.message, 'success');
     showGame();
+  });
+
+  socket.on('game:kicked', (data) => {
+    showNotification(data.reason || '您已被移出游戏', 'warning');
+    showLobby();
   });
 
   socket.on('lobby:stats', (data) => {
@@ -497,6 +512,10 @@ function connectSocket() {
     }
   });
 
+  socket.on('game:readyCountdown', (data) => {
+    updateReadyCountdown(data.remaining);
+  });
+
   socket.on('game:state', (state) => {
     gameState = state;
     render();
@@ -536,6 +555,13 @@ function nextHand() {
     // Hide buttons, show waiting msg
     els.actionButtons.innerHTML = `<span style="color: var(--text-muted); font-size: 0.85rem;">等待其他玩家准备...</span>`;
   }
+}
+
+function backToLobby() {
+  if (socket) {
+    socket.emit('lobby:leave');
+  }
+  showLobby();
 }
 
 // ── Chat ──────────────────────────────────────────────────────
@@ -796,6 +822,11 @@ function renderActions() {
 
   if (actions.includes('nextHand')) {
     html += `<button class="btn btn-primary btn-lg" onclick="window._nextHand()">准备下一手 ➜</button>`;
+    html += `<button class="btn btn-ghost btn-sm" style="margin-left: 8px;" onclick="window._backToLobby()">返回大厅</button>`;
+    // 显示准备倒计时
+    if (gameState.readyRemainingTime && gameState.readyRemainingTime > 0) {
+      html += `<span class="ready-countdown" style="margin-left: 12px; color: ${gameState.readyRemainingTime <= 10 ? 'var(--danger)' : 'var(--text-muted)'}; font-size: 0.85rem;">⏱ ${gameState.readyRemainingTime}s</span>`;
+    }
     els.actionButtons.innerHTML = html;
     els.raiseControls.classList.add('hidden');
     raiseMode = false;
@@ -803,7 +834,12 @@ function renderActions() {
   }
 
   if (actions.length === 0) {
-    html += `<span style="color: var(--text-muted); font-size: 0.85rem;">等待对手行动...</span>`;
+    if (gameState.isSpectator) {
+      html += `<span style="color: var(--text-muted); font-size: 0.85rem;">观战中</span>`;
+      html += `<button class="btn btn-ghost btn-sm" style="margin-left: 8px;" onclick="window._backToLobby()">返回大厅</button>`;
+    } else {
+      html += `<span style="color: var(--text-muted); font-size: 0.85rem;">等待对手行动...</span>`;
+    }
     els.actionButtons.innerHTML = html;
     els.raiseControls.classList.add('hidden');
     return;
@@ -919,6 +955,8 @@ function showBustedModal(data) {
 }
 
 // ── Timer ─────────────────────────────────────────────────────
+let readyCountdownInterval = null;
+
 function renderTimer() {
   if (!gameState || !gameState.remainingTime) {
     els.timerDisplay.classList.add('hidden');
@@ -953,6 +991,15 @@ function renderTimer() {
     }
     updateTimerDisplay(remaining, gameState.turnTimeout);
   }, 1000);
+}
+
+function updateReadyCountdown(remaining) {
+  // 更新准备倒计时（在 SHOWDOWN 或 FINISHED 阶段）
+  const countdownEl = document.querySelector('.ready-countdown');
+  if (countdownEl) {
+    countdownEl.textContent = `⏱ ${remaining}s`;
+    countdownEl.style.color = remaining <= 10 ? 'var(--danger)' : 'var(--text-muted)';
+  }
 }
 
 function updateTimerDisplay(remaining, total) {
@@ -1648,11 +1695,11 @@ function formatDate(dateStr) {
 function updateRechargePreview() {
   const amount = parseFloat(document.getElementById('recharge-amount')?.value) || 0;
   const activeToken = document.querySelector('.token-option.active');
-  const token = activeToken?.dataset.token || 'USDT';
+  const selectedToken = activeToken?.dataset.token || 'USDT';
   
-  // Conversion rate: 1 token = 100 chips
-  const rates = { USDT: 100, USDC: 100, ETH: 200000 };
-  const chips = Math.floor(amount * (rates[token] || 100));
+  // Conversion rate: 1 token = 10000 chips (aligned with backend config)
+  const rates = { USDT: 10000, USDC: 10000, ETH: 20000000 };
+  const chips = Math.floor(amount * (rates[selectedToken] || 10000));
   
   const previewEl = document.getElementById('preview-chips');
   if (previewEl) {
@@ -1663,7 +1710,7 @@ function updateRechargePreview() {
 async function createRechargeOrder() {
   const amount = parseFloat(document.getElementById('recharge-amount')?.value);
   const activeToken = document.querySelector('.token-option.active');
-  const token = activeToken?.dataset.token || 'USDT';
+  const selectedToken = activeToken?.dataset.token || 'USDT';
   
   if (!amount || amount <= 0) {
     showNotification('请输入有效金额', 'danger');
@@ -1677,7 +1724,7 @@ async function createRechargeOrder() {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: JSON.stringify({ amount, token })
+      body: JSON.stringify({ amount, token: selectedToken })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -2117,6 +2164,7 @@ function setupEventListeners() {
 // Global exposure for inline HTML handlers
 window._action = (action) => performAction(action);
 window._nextHand = () => nextHand();
+window._backToLobby = () => backToLobby();
 window._toggleRaise = () => {
   raiseMode = !raiseMode;
   renderActions();
