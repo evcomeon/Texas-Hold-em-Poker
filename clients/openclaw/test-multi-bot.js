@@ -34,6 +34,8 @@ class TestBot {
     this.logMessages = [];
     this.isReady = false;
     this.lastHandNumber = 0;
+    this.pendingTurnKey = null;
+    this.actedTurnKey = null;
   }
 
   log(message) {
@@ -71,8 +73,8 @@ class TestBot {
   }
 
   setupEventHandlers() {
-    this.socket.on('lobby:state', (data) => {
-      this.log(`大厅状态: 在线 ${data.onlineCount} 人`);
+    this.socket.on('lobby:stats', (data) => {
+      this.log(`大厅状态: 在线 ${data.online || 0} 人`);
     });
 
     this.socket.on('game:start', (data) => {
@@ -87,9 +89,8 @@ class TestBot {
       this.isReady = false;
     });
 
-    this.socket.on('lobby:matched', (data) => {
-      this.playerId = data.players.find(p => p.isMe)?.id;
-      this.log(`匹配成功! 房间: ${data.roomId}`);
+    this.socket.on('lobby:queued', (data) => {
+      this.log(`匹配中: 队列 ${data.queueSize || 0} 人`);
     });
 
     this.socket.on('game:state', (state) => {
@@ -147,7 +148,13 @@ class TestBot {
 
   handleGameState(state) {
     if (this.isMyTurn(state)) {
-      setTimeout(() => this.makeDecision(state), 500 + Math.random() * 1000);
+      const turnKey = this.getTurnKey(state);
+      if (turnKey && turnKey !== this.pendingTurnKey && turnKey !== this.actedTurnKey) {
+        this.pendingTurnKey = turnKey;
+        setTimeout(() => this.makeDecision(turnKey), 500 + Math.random() * 1000);
+      }
+    } else {
+      this.pendingTurnKey = null;
     }
     
     // 如果是 SHOWDOWN 阶段且不是观战者，自动准备下一手
@@ -170,6 +177,11 @@ class TestBot {
     }
   }
 
+  getTurnKey(state) {
+    if (!state || typeof state.handNumber !== 'number') return null;
+    return `${state.handNumber}:${state.phase}:${state.currentPlayerIndex}:${state.currentBet}`;
+  }
+
   isMyTurn(state) {
     if (!state || state.phase === 'WAITING' || state.phase === 'FINISHED' || state.phase === 'SHOWDOWN') {
       return false;
@@ -186,11 +198,18 @@ class TestBot {
     return false;
   }
 
-  makeDecision(state) {
-    if (!this.isMyTurn(state)) return;
+  makeDecision(expectedTurnKey) {
+    const state = this.gameState;
+    if (!state || expectedTurnKey !== this.getTurnKey(state) || !this.isMyTurn(state)) {
+      this.pendingTurnKey = null;
+      return;
+    }
     
     const me = state.players.find(p => p.isMe);
-    if (!me) return;
+    if (!me) {
+      this.pendingTurnKey = null;
+      return;
+    }
     
     const callAmount = state.currentBet - (me.bet || 0);
     const actions = state.actions || [];
@@ -221,6 +240,8 @@ class TestBot {
       this.socket.emit('game:action', { action: 'fold' });
     }
     
+    this.actedTurnKey = expectedTurnKey;
+    this.pendingTurnKey = null;
     this.log(`操作: ${action}`);
   }
 
@@ -252,6 +273,7 @@ class TestRunner {
   constructor() {
     this.bots = [];
     this.handCount = 0;
+    this.lastObservedHandNumber = 0;
     this.startTime = null;
     this.logs = [];
     this.isFinished = false;
@@ -298,12 +320,23 @@ class TestRunner {
 
   setupMonitoring() {
     const leadBot = this.bots[0];
-    leadBot.socket.on('game:hand_end', (result) => {
-      this.handCount++;
-      this.log(`=== 第 ${this.handCount}/${TARGET_HANDS} 局完成 ===`);
-      
-      if (this.handCount >= TARGET_HANDS) {
-        this.finish();
+    leadBot.socket.on('game:state', (state) => {
+      if (!state || typeof state.handNumber !== 'number') return;
+
+      if (this.lastObservedHandNumber === 0) {
+        this.lastObservedHandNumber = state.handNumber;
+        return;
+      }
+
+      if (state.handNumber > this.lastObservedHandNumber) {
+        const completedHands = state.handNumber - this.lastObservedHandNumber;
+        this.handCount += completedHands;
+        this.lastObservedHandNumber = state.handNumber;
+        this.log(`=== 第 ${this.handCount}/${TARGET_HANDS} 局完成 ===`);
+
+        if (this.handCount >= TARGET_HANDS) {
+          this.finish();
+        }
       }
     });
     

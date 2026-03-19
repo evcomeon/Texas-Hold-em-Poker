@@ -5,10 +5,12 @@
 const { OAuth2Client } = require('google-auth-library');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const logger = require('./lib/logger');
+const config = require('./config');
 
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_poker_key_2026';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '365d';
+const client = new OAuth2Client(config.google.clientId);
+const JWT_SECRET = config.jwt.secret;
+const JWT_EXPIRES_IN = config.jwt.expiresIn;
 
 async function verifyGoogleToken(token) {
   if (token.startsWith('mock_')) {
@@ -24,11 +26,11 @@ async function verifyGoogleToken(token) {
   try {
     const ticket = await client.verifyIdToken({
       idToken: token,
-      audience: process.env.GOOGLE_CLIENT_ID,
+      audience: config.google.clientId,
     });
     return ticket.getPayload();
   } catch (error) {
-    console.error('Error verifying Google Token:', error);
+    logger.error('auth.google_verify_failed', { error });
     throw new Error('Invalid Google Auth Token');
   }
 }

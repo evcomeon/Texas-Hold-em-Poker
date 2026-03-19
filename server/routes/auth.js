@@ -7,6 +7,7 @@ const router = express.Router();
 const { verifyGoogleToken, generateJWT, verifyJWT, hashPassword, comparePassword } = require('../auth');
 const UserModel = require('../models/user');
 const { cacheSession, deleteSession, getSession } = require('../cache/redis');
+const logger = require('../lib/logger');
 
 router.post('/register', async (req, res) => {
   const { username, email, password } = req.body;
@@ -55,7 +56,7 @@ router.post('/register', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Registration error:', err);
+    logger.error('auth.register_failed', { username, email, error: err });
     if (err.code === '23505') {
       return res.status(409).json({ error: '邮箱已被注册' });
     }
@@ -104,7 +105,7 @@ router.post('/login', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Login error:', err);
+    logger.error('auth.login_failed', { username, error: err });
     res.status(500).json({ error: '登录失败，请稍后重试' });
   }
 });
@@ -118,13 +119,17 @@ router.post('/google', async (req, res) => {
 
   try {
     const payload = await verifyGoogleToken(credential);
-    console.log('Google payload:', JSON.stringify(payload, null, 2));
+    logger.info('auth.google_payload_verified', {
+      googleId: payload.sub,
+      email: payload.email,
+      hasPicture: Boolean(payload.picture),
+    });
     
     let user = await UserModel.findByGoogleId(payload.sub);
     
     if (!user) {
       const username = payload.name || payload.given_name || `Player_${payload.sub.slice(-6)}`;
-      console.log('Creating new user with username:', username);
+      logger.info('auth.google_creating_user', { googleId: payload.sub, username });
       
       user = await UserModel.create({
         googleId: payload.sub,
@@ -139,7 +144,7 @@ router.post('/google', async (req, res) => {
       await UserModel.updateLastLogin(user.id);
     }
 
-    console.log('User after Google login:', JSON.stringify(user, null, 2));
+    logger.info('auth.google_login_succeeded', { userId: user.id, username: user.username });
 
     const token = generateJWT(user);
     await cacheSession(user.id, { userId: user.id, createdAt: Date.now() });
@@ -158,7 +163,7 @@ router.post('/google', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Google auth error:', err);
+    logger.error('auth.google_failed', { error: err });
     return res.status(401).json({ error: err.message || 'Google登录失败' });
   }
 });
@@ -192,7 +197,7 @@ router.post('/guest', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Guest login error:', err);
+    logger.error('auth.guest_failed', { error: err });
     res.status(500).json({ error: '游客登录失败' });
   }
 });
@@ -299,13 +304,11 @@ router.post('/wallet/nonce', async (req, res) => {
   try {
     const WalletModel = require('../models/wallet');
     const nonce = await WalletModel.generateNonce(address);
-    
-    console.log('[Wallet Nonce] address:', address);
-    console.log('[Wallet Nonce] generated nonce:', nonce);
+    logger.info('auth.wallet_nonce_generated', { address });
     
     res.json({ nonce });
   } catch (err) {
-    console.error('Wallet nonce error:', err);
+    logger.error('auth.wallet_nonce_failed', { address, error: err });
     res.status(500).json({ error: '获取nonce失败' });
   }
 });
@@ -324,9 +327,7 @@ router.post('/wallet/verify', async (req, res) => {
     
     // Get stored nonce
     const nonce = await WalletModel.getNonce(address);
-    console.log('[Wallet Verify] address:', address);
-    console.log('[Wallet Verify] nonce:', nonce);
-    console.log('[Wallet Verify] signature:', signature);
+    logger.info('auth.wallet_verify_attempt', { address, hasNonce: Boolean(nonce) });
     
     if (!nonce) {
       return res.status(401).json({ error: '请先获取nonce' });
@@ -341,17 +342,15 @@ router.post('/wallet/verify', async (req, res) => {
       const nonceBytes = ethers.getBytes('0x' + nonce);
       recoveredAddress = ethers.verifyMessage(nonceBytes, signature);
     } catch (e) {
-      console.error('[Wallet Verify] verifyMessage error:', e);
+      logger.warn('auth.wallet_verify_signature_invalid', { address, error: e });
       return res.status(401).json({ error: '签名格式错误' });
     }
     
-    console.log('[Wallet Verify] recoveredAddress:', recoveredAddress);
-    console.log('[Wallet Verify] address (lowercase):', address.toLowerCase());
-    
     if (recoveredAddress.toLowerCase() !== address.toLowerCase()) {
-      console.error('[Wallet Verify] Address mismatch!');
-      console.error('[Wallet Verify] Expected:', address);
-      console.error('[Wallet Verify] Got:', recoveredAddress);
+      logger.warn('auth.wallet_verify_address_mismatch', {
+        expectedAddress: address,
+        recoveredAddress,
+      });
       return res.status(401).json({ 
         error: `签名账户不匹配。请确认 MetaMask 中选中的账户是 ${address}`,
         expectedAddress: address,
@@ -378,7 +377,7 @@ router.post('/wallet/verify', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Wallet verify error:', err);
+    logger.error('auth.wallet_verify_failed', { address, error: err });
     res.status(500).json({ error: err.message || '钱包登录失败' });
   }
 });

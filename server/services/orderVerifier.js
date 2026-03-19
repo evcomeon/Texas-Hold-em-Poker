@@ -1,6 +1,7 @@
 const { ethers } = require('ethers');
 const RechargeOrder = require('../models/recharge');
 const logger = require('../utils/logger');
+const config = require('../config');
 
 const ERC20_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
@@ -16,12 +17,12 @@ class OrderVerifier {
     this.interval = null;
     
     this.config = {
-      rpcUrl: process.env.RPC_URL || 'https://eth.llamarpc.com',
-      confirmationBlocks: parseInt(process.env.CONFIRMATION_BLOCKS) || 3,
-      checkInterval: parseInt(process.env.ORDER_CHECK_INTERVAL) || 5000,
-      usdtAddress: process.env.USDT_CONTRACT_ADDRESS || '0xdAC17F958D2ee523a2206206994597C13D831ec7',
-      usdcAddress: process.env.USDC_CONTRACT_ADDRESS || '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
-      walletAddress: process.env.RECHARGE_WALLET_ADDRESS
+      rpcUrl: config.recharge.rpcUrl,
+      confirmationBlocks: config.recharge.confirmationBlocks,
+      checkInterval: config.recharge.orderCheckIntervalMs,
+      usdtAddress: config.recharge.usdtAddress,
+      usdcAddress: config.recharge.usdcAddress,
+      walletAddress: config.recharge.walletAddress
     };
   }
 

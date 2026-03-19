@@ -19,6 +19,8 @@ class OpenClawPokerClient {
     this.isConnected = false;
     this.isInGame = false;
     this.isSpectator = false;
+    this.pendingTurnKey = null;
+    this.actedTurnKey = null;
     
     this.onGameState = options.onGameState || this.defaultOnGameState;
     this.onHandEnd = options.onHandEnd || this.defaultOnHandEnd;
@@ -58,15 +60,30 @@ class OpenClawPokerClient {
   }
 
   setupEventHandlers() {
-    this.socket.on('lobby:state', (data) => {
-      this.log(`📊 大厅状态: 在线 ${data.onlineCount} 人`);
+    this.socket.on('lobby:stats', (data) => {
+      this.log(`📊 大厅状态: 在线 ${data.online || 0} 人`);
     });
 
-    this.socket.on('lobby:matched', (data) => {
+    this.socket.on('lobby:queued', (data) => {
+      this.log(`⏳ 匹配中: 队列 ${data.queueSize || 0} 人, 级别 ${data.stakeLevel}`);
+    });
+
+    this.socket.on('game:start', (data) => {
       this.currentRoomId = data.roomId;
-      this.playerId = data.players.find(p => p.isMe)?.id;
-      this.log(`🎮 匹配成功! 房间: ${data.roomId}`);
-      this.log(`👥 玩家: ${data.players.map(p => p.name).join(', ')}`);
+      this.isInGame = true;
+      this.isSpectator = false;
+      this.log(`🎮 游戏开始! 房间: ${data.roomId}`);
+    });
+
+    this.socket.on('game:spectator', (data) => {
+      this.currentRoomId = data.roomId;
+      this.isInGame = true;
+      this.isSpectator = true;
+      this.log(`👀 进入观战! 房间: ${data.roomId}`);
+    });
+
+    this.socket.on('game:notification', (data) => {
+      this.log(`📢 ${data.msg}`);
     });
 
     this.socket.on('game:state', (state) => {
@@ -94,8 +111,8 @@ class OpenClawPokerClient {
       this.log(`⚠️ 错误: ${error.message}`);
     });
 
-    this.socket.on('chat:message', (data) => {
-      this.log(`💬 ${data.username}: ${data.text}`);
+    this.socket.on('game:chat', (data) => {
+      this.log(`💬 ${data.userName}: ${data.text}`);
     });
   }
 
@@ -153,23 +170,18 @@ class OpenClawPokerClient {
 
   isMyTurn() {
     if (!this.gameState) return false;
-    if (this.gameState.phase === 'WAITING' || this.gameState.phase === 'FINISHED') return false;
+    if (this.gameState.phase === 'WAITING' || this.gameState.phase === 'FINISHED' || this.gameState.phase === 'SHOWDOWN') return false;
     
     const me = this.getMyPlayer();
-    if (!me) return false;
+    if (!me || me.folded || me.allIn || !me.isActive) return false;
     
-    // 使用 currentPlayerIndex 判断
     const currentPlayerIdx = this.gameState.currentPlayerIndex;
-    if (currentPlayerIdx !== undefined && me.originalIndex === currentPlayerIdx) {
-      return true;
-    }
-    
-    // 备用：检查 actions 是否有操作
-    if (this.gameState.actions && this.gameState.actions.length > 0) {
-      return !me.folded && !me.allIn && me.isActive;
-    }
-    
-    return false;
+    return currentPlayerIdx !== undefined && me.originalIndex === currentPlayerIdx;
+  }
+
+  getTurnKey(state = this.gameState) {
+    if (!state || typeof state.handNumber !== 'number') return null;
+    return `${state.handNumber}:${state.phase}:${state.currentPlayerIndex}:${state.currentBet}`;
   }
 
   getMyPlayer() {
@@ -219,7 +231,7 @@ class OpenClawPokerClient {
 
   sendChat(message) {
     if (this.socket) {
-      this.socket.emit('chat:send', { message });
+      this.socket.emit('game:chat', { text: message });
     }
   }
 
@@ -271,9 +283,14 @@ class OpenClawPokerClient {
     }
 
     if (this.isMyTurn()) {
-      this.log(`\n⏰ 轮到我操作! 剩余时间: ${state.remainingTime || state.timeLeft || '?'}秒`);
-      this.makeDecision(state);
+      const turnKey = this.getTurnKey(state);
+      if (turnKey && turnKey !== this.pendingTurnKey && turnKey !== this.actedTurnKey) {
+        this.pendingTurnKey = turnKey;
+        this.log(`\n⏰ 轮到我操作! 剩余时间: ${state.remainingTime || state.timeLeft || '?'}秒`);
+        this.makeDecision(turnKey);
+      }
     } else {
+      this.pendingTurnKey = null;
       this.log(`\n等待其他玩家...`);
     }
   }
@@ -292,8 +309,10 @@ class OpenClawPokerClient {
     }, 1000);
   }
 
-  makeDecision(state) {
-    if (!this.isMyTurn()) {
+  makeDecision(expectedTurnKey) {
+    const state = this.gameState;
+    if (!state || expectedTurnKey !== this.getTurnKey(state) || !this.isMyTurn()) {
+      this.pendingTurnKey = null;
       this.log(`⚠️ 不是我的回合，跳过决策`);
       return;
     }
@@ -353,11 +372,14 @@ class OpenClawPokerClient {
       if (callAmount === 0) {
         this.log(`  决策: 过牌`);
         this.check();
-      } else {
-        this.log(`  决策: 弃牌`);
-        this.fold();
-      }
+    } else {
+      this.log(`  决策: 弃牌`);
+      this.fold();
     }
+
+    this.actedTurnKey = expectedTurnKey;
+    this.pendingTurnKey = null;
+  }
   }
 
   evaluateHandStrength(holeCards, communityCards) {

@@ -7,9 +7,11 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const gameRoutes = require('./routes/game');
+const logger = require('./lib/logger');
+const config = require('./config');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = config.app.port;
 
 // Middleware
 app.use(cors());
@@ -47,7 +49,7 @@ async function startServer() {
       const { connectRedis } = require('./cache/redis');
       await connectRedis();
     } catch (redisError) {
-      console.log('⚠️ Redis not available, using in-memory cache');
+      logger.warn('redis.unavailable', { error: redisError });
     }
     
     // 启动订单验证服务
@@ -55,16 +57,16 @@ async function startServer() {
       const orderVerifier = require('./services/orderVerifier');
       await orderVerifier.initialize();
       orderVerifier.start();
-      console.log('✅ Order verifier started');
+      logger.info('order_verifier.started');
     } catch (verifierError) {
-      console.log('⚠️ Order verifier not started:', verifierError.message);
+      logger.warn('order_verifier.not_started', { error: verifierError });
     }
     
     server.listen(PORT, () => {
-      console.log(`🃏 Texas Hold'em Server & WebSocket running on http://localhost:${PORT}`);
+      logger.info('server.started', { port: PORT });
     });
   } catch (error) {
-    console.error('Failed to start server:', error);
+    logger.error('server.start_failed', { error });
     process.exit(1);
   }
 }

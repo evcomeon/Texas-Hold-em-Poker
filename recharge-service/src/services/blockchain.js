@@ -356,7 +356,7 @@ class BlockchainMonitor {
         
         // 再次检查是否已处理（在事务内）
         const checkResult = await client.query(
-          'SELECT status FROM recharge_orders WHERE tx_hash = $1 FOR UPDATE',
+          'SELECT id, status FROM recharge_transactions WHERE tx_hash = $1 FOR UPDATE',
           [transactionHash]
         );
         
@@ -370,28 +370,58 @@ class BlockchainMonitor {
         let rechargeTx;
         if (existingTx) {
           await client.query(
-            'UPDATE recharge_orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-            ['processing', existingTx.id]
+            `UPDATE recharge_transactions
+             SET status = $1,
+                 order_no = COALESCE(order_no, $2),
+                 user_id = COALESCE(user_id, $3),
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $4`,
+            ['processing', pendingOrder.order_no, pendingOrder.user_id, existingTx.id]
           );
-          rechargeTx = { ...existingTx, status: 'processing' };
+          rechargeTx = {
+            ...existingTx,
+            order_no: existingTx.order_no || pendingOrder.order_no,
+            user_id: existingTx.user_id || pendingOrder.user_id,
+            status: 'processing'
+          };
         } else {
           const result = await client.query(
-            `INSERT INTO recharge_orders 
-             (order_no, user_id, wallet_address, token_symbol, token_amount, chips_amount, tx_hash, to_address, from_address, status, block_number)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            `INSERT INTO recharge_transactions
+             (user_id, order_no, tx_hash, token_symbol, token_amount, chips_amount, from_address, to_address, block_number, confirmations, status)
+             VALUES ($1, $2, $3, $4, $5, $6, LOWER($7), LOWER($8), $9, $10, $11)
+             RETURNING *`,
+            [
+              pendingOrder.user_id,
+              pendingOrder.order_no,
+              transactionHash,
+              config.tokens[token].symbol,
+              tokenAmount,
+              chipsAmount,
+              from,
+              to,
+              blockNumber,
+              0,
+              'processing'
+            ]
+          );
+          rechargeTx = result.rows[0];
+        }
+
+        // 对已存在但未关联订单的交易补齐字段
+        if (checkResult.rows.length > 0 && !existingTx) {
+          const result = await client.query(
+            `UPDATE recharge_transactions
+             SET order_no = COALESCE(order_no, $1),
+                 user_id = COALESCE(user_id, $2),
+                 status = $3,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $4
              RETURNING *`,
             [
               pendingOrder.order_no,
               pendingOrder.user_id,
-              pendingOrder.wallet_address,
-              config.tokens[token].symbol,
-              tokenAmount,
-              chipsAmount,
-              transactionHash,
-              to,
-              from,
               'processing',
-              blockNumber
+              checkResult.rows[0].id
             ]
           );
           rechargeTx = result.rows[0];
@@ -409,14 +439,13 @@ class BlockchainMonitor {
         
         // 更新订单状态为完成
         await client.query(
-          'UPDATE recharge_orders SET status = $1, confirmed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE order_no = $2',
-          ['completed', pendingOrder.order_no]
-        );
-        
-        // 更新原订单的tx_hash（如果是分开的表）
-        await client.query(
-          'UPDATE recharge_orders SET tx_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE order_no = $2',
-          [transactionHash, pendingOrder.order_no]
+          `UPDATE recharge_orders
+           SET status = $1,
+               tx_hash = $2,
+               confirmed_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE order_no = $3`,
+          ['completed', transactionHash, pendingOrder.order_no]
         );
         
         await client.query('COMMIT');

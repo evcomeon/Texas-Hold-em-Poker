@@ -3,15 +3,17 @@ const router = express.Router();
 const RechargeOrder = require('../models/recharge');
 const WalletModel = require('../models/wallet');
 const UserModel = require('../models/user');
+const logger = require('../lib/logger');
+const config = require('../config');
 
 const RECHARGE_CONFIG = {
-  CHIPS_PER_USD: parseInt(process.env.CHIPS_PER_USD) || 10000,
-  MIN_AMOUNT: parseFloat(process.env.MIN_RECHARGE_AMOUNT) || 1,
-  MAX_AMOUNT: parseFloat(process.env.MAX_RECHARGE_AMOUNT) || 0,
-  WALLET_ADDRESS: process.env.RECHARGE_WALLET_ADDRESS || '0x0000000000000000000000000000000000000000',
-  USDT_ADDRESS: process.env.USDT_CONTRACT_ADDRESS || '0xdAC17F958D2ee523a2206206994597C13D831ec7',
-  USDC_ADDRESS: process.env.USDC_CONTRACT_ADDRESS || '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
-  CONFIRMATION_BLOCKS: parseInt(process.env.CONFIRMATION_BLOCKS) || 3
+  CHIPS_PER_USD: config.recharge.chipsPerUsd,
+  MIN_AMOUNT: config.recharge.minAmount,
+  MAX_AMOUNT: config.recharge.maxAmount,
+  WALLET_ADDRESS: config.recharge.walletAddress,
+  USDT_ADDRESS: config.recharge.usdtAddress,
+  USDC_ADDRESS: config.recharge.usdcAddress,
+  CONFIRMATION_BLOCKS: config.recharge.confirmationBlocks
 };
 
 router.get('/config', (req, res) => {
@@ -120,7 +122,7 @@ router.post('/create', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Create order error:', error);
+    logger.error('recharge.create_order_failed', { error });
     res.status(500).json({ error: error.message || '创建订单失败' });
   }
 });
@@ -175,7 +177,7 @@ router.post('/submit-tx', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Submit tx error:', error);
+    logger.error('recharge.submit_tx_failed', { error });
     res.status(500).json({ error: error.message || '提交失败' });
   }
 });
@@ -216,7 +218,7 @@ router.get('/status/:orderId', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Get status error:', error);
+    logger.error('recharge.get_status_failed', { orderId: req.params.orderId, error });
     res.status(500).json({ error: '查询状态失败' });
   }
 });

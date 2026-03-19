@@ -2,13 +2,14 @@
 
 ## 概述
 
-本文档描述了德州扑克游戏的开放 API，供外部程序和 AI 接入使用。
+本文档描述了德州扑克游戏的完整 API，包括 REST API 和 WebSocket API。
 
 ### 基础信息
 
 | 项目 | 值 |
 |------|-----|
 | Base URL | `http://localhost:3001/api` |
+| WebSocket | `ws://localhost:3001/socket.io/` |
 | 协议 | HTTP/1.1, WebSocket |
 | 数据格式 | JSON |
 | 字符编码 | UTF-8 |
@@ -28,7 +29,7 @@ Authorization: Bearer <jwt_token>
 - 有效期：1 年
 - 获取方式：通过登录接口获取
 
-### 2. API Key（推荐用于程序接入）
+### 2. API Key（推荐用于程序/Bot 接入）
 
 ```
 Authorization: ApiKey <api_key>
@@ -454,19 +455,35 @@ Authorization: Bearer <jwt_token>
 
 ### 连接
 
-```
-ws://localhost:3001/socket.io/?token=<jwt_token>
+```javascript
+const socket = io('http://localhost:3001', {
+  auth: { token: '<jwt_token>' }
+  // 或使用 API Key
+  // auth: { apiKey: '<api_key>' }
+});
 ```
 
-或使用 API Key：
+### 玩家连接状态模型
 
-```
-ws://localhost:3001/socket.io/?apiKey=<api_key>
-```
+服务器使用统一的连接状态模型：
+
+| 状态 | 值 | 说明 |
+|------|-----|------|
+| ONLINE | `online` | 玩家在线，可以正常游戏 |
+| DISCONNECTED | `disconnected` | 玩家掉线，可以重连恢复 |
+| REMOVED | `removed` | 玩家已被移除，不可重连 |
+
+**状态转换：**
+- `ONLINE` → `DISCONNECTED`: 玩家掉线
+- `DISCONNECTED` → `ONLINE`: 玩家重连成功
+- `DISCONNECTED` → `REMOVED`: 准备超时/被踢出
+- `ONLINE` → `REMOVED`: 主动离开/筹码不足(Busted)
+
+---
 
 ### 客户端事件（Client → Server）
 
-#### 加入大厅
+#### 加入大厅/队列
 
 ```javascript
 socket.emit('lobby:join', {
@@ -474,11 +491,20 @@ socket.emit('lobby:join', {
 });
 ```
 
-#### 离开大厅
+**响应事件:**
+- `lobby:queued` - 已进入等待队列
+- `lobby:error` - 加入失败（如筹码不足）
+- `game:start` - 匹配成功，游戏开始
+- `game:spectator` - 作为观战者加入（人数已满时）
+
+#### 离开大厅/队列
 
 ```javascript
 socket.emit('lobby:leave');
 ```
+
+**响应事件:**
+- `lobby:left` - 已离开队列
 
 #### 游戏操作
 
@@ -489,19 +515,40 @@ socket.emit('game:action', {
 });
 ```
 
-#### 发送聊天
+**响应事件:**
+- `game:state` - 更新后的游戏状态
+- `game:error` - 操作失败
+
+#### 准备下一手牌
 
 ```javascript
-socket.emit('chat:send', {
-  message: 'Hello everyone!'
+socket.emit('game:next');
+```
+
+**响应事件:**
+- `game:readyProgress` - 准备进度更新
+- `game:start` - 新一手牌开始
+- `game:notification` - 通知消息（如玩家不足）
+
+#### 发送聊天消息
+
+```javascript
+socket.emit('game:chat', {
+  text: 'Hello everyone!'
 });
 ```
+
+**响应事件:**
+- `game:chat` - 广播给房间内所有人
 
 #### 获取游戏历史
 
 ```javascript
 socket.emit('game:history');
 ```
+
+**响应事件:**
+- `game:history` - 返回最近50条游戏记录
 
 ---
 
@@ -510,20 +557,36 @@ socket.emit('game:history');
 #### 大厅状态更新
 
 ```javascript
-socket.on('lobby:state', (data) => {
-  // data = { onlineCount: 50, queueCounts: { low: 0, medium: 3, high: 1 } }
+socket.on('lobby:stats', (data) => {
+  // data = { online: 50 }
 });
 ```
 
-#### 匹配成功
+#### 已进入队列
 
 ```javascript
-socket.on('lobby:matched', (data) => {
-  // data = { roomId: 'room_xxx', players: [...], stakeConfig: {...} }
+socket.on('lobby:queued', (data) => {
+  // data = { status: 'waiting', queueSize: 3, stakeLevel: 'medium' }
 });
 ```
 
-#### 游戏状态更新
+#### 游戏开始
+
+```javascript
+socket.on('game:start', (data) => {
+  // data = { roomId: 'room_xxx' }
+});
+```
+
+#### 观战模式
+
+```javascript
+socket.on('game:spectator', (data) => {
+  // data = { roomId: 'room_xxx', message: '您正在观战，下一手牌将加入游戏' }
+});
+```
+
+#### 游戏状态更新（核心）
 
 ```javascript
 socket.on('game:state', (state) => {
@@ -531,187 +594,219 @@ socket.on('game:state', (state) => {
   state = {
     phase: 'PRE_FLOP',      // 'WAITING' | 'PRE_FLOP' | 'FLOP' | 'TURN' | 'RIVER' | 'SHOWDOWN' | 'FINISHED'
     handNumber: 1,
-    communityCards: [],
+    communityCards: [
+      { rank: 'A', suit: 'spades', display: 'A♠' }
+    ],
     pot: 30,
     currentBet: 20,
-    currentPlayer: 'player_id',
+    currentPlayerIndex: 2,   // 当前轮到哪位玩家
+    dealerIndex: 0,          // 庄家位置
+    isSpectator: false,      // 是否为观战者
+    isPlayer: true,          // 是否为玩家
+    isMyTurn: false,         // 是否轮到自己操作
+    maxPlayers: 8,
+    playerCount: 3,
+    spectatorCount: 0,
+    turnTimeout: 30,         // 每回合超时时间（秒）
+    remainingTime: 25,       // 当前回合剩余时间
+    readyTimeout: 30,        // 准备阶段超时时间
+    readyRemainingTime: null,// 准备阶段剩余时间
     players: [
       {
-        id: 'player_id',
-        name: 'Player1',
+        id: 79,
+        name: 'TestBot1',
+        picture: null,
         chips: 10000,
-        bet: 0,
+        bet: 10,
+        totalBet: 10,
         folded: false,
-        isAllIn: false,
-        cards: null,        // 自己的牌会显示
-        position: 0         // 0=庄家, 1=小盲, 2=大盲
+        allIn: false,
+        isDealer: true,
+        isActive: true,
+        disconnected: false,
+        connectionState: 'online',  // 'online' | 'disconnected' | 'removed'
+        isMe: false,
+        originalIndex: 0,
+        holeCards: [{ hidden: true }, { hidden: true }],  // 别人的牌隐藏
+        bestHand: '一对'  // 仅在 SHOWDOWN 且未弃牌时显示
       }
     ],
-    smallBlind: 10,
-    bigBlind: 20,
-    dealerIndex: 0,
-    timeLeft: 30           // 当前玩家剩余时间（秒）
+    actions: ['fold', 'call', 'raise', 'allin'],  // 当前可执行的操作
+    log: ['[12:34:56] TestBot1 跟注 10']
   }
   */
 });
 ```
 
-#### 游戏日志
+#### 准备进度更新
 
 ```javascript
-socket.on('game:log', (log) => {
-  // log = { time: '12:34:56', message: 'Player1 加注 100' }
-});
-```
-
-#### 游戏结束
-
-```javascript
-socket.on('game:hand_end', (result) => {
+socket.on('game:readyProgress', (data) => {
   /*
-  result = {
-    winners: [{ id: 'player_id', amount: 1000, hand: '一对' }],
-    communityCards: ['Ah', 'Kd', '5c', '2s', '9h'],
-    pot: 1000
+  data = {
+    ready: false,      // 是否所有人都已准备
+    count: 2,          // 已准备人数
+    total: 3,          // 总活跃玩家数
+    readyPlayers: [79, 80]  // 已准备的玩家ID列表
   }
   */
+});
+```
+
+#### 游戏通知
+
+```javascript
+socket.on('game:notification', (data) => {
+  // data = { msg: 'TestBot1 加入了桌子 (3/8)' }
 });
 ```
 
 #### 聊天消息
 
 ```javascript
-socket.on('chat:message', (data) => {
-  // data = { userId: 'xxx', username: 'Player1', text: 'Hello!', time: '12:34:56' }
+socket.on('game:chat', (message) => {
+  /*
+  message = {
+    userId: 79,
+    userName: 'TestBot1',
+    text: 'Hello!',
+    time: 1712345678901
+  }
+  */
 });
 ```
 
-#### 错误消息
+#### 被踢出游戏
 
 ```javascript
-socket.on('error', (error) => {
-  // error = { code: 'ERROR_CODE', message: 'Error description' }
+socket.on('game:kicked', (data) => {
+  // data = { reason: '准备超时，已自动退出游戏' }
+});
+```
+
+#### 筹码不足（Busted）
+
+```javascript
+socket.on('game:busted', (data) => {
+  // data = { message: '您的筹码不足，无法继续游戏，请充值后继续', currentChips: 0 }
+});
+```
+
+#### 重连成功
+
+```javascript
+socket.on('game:reconnected', (data) => {
+  // data = { message: '已重连到游戏', roomId: 'room_xxx' }
+});
+```
+
+#### 游戏历史记录
+
+```javascript
+socket.on('game:history', (data) => {
+  /*
+  data = {
+    history: [
+      { time: '12:34:56', message: 'TestBot1 加注 100' }
+    ]
+  }
+  */
 });
 ```
 
 ---
 
-## 游戏状态机
+## 游戏流程示例
 
-### 阶段流转
+### 1. 完整游戏流程
 
+```javascript
+const socket = io('http://localhost:3001', {
+  auth: { token: '<jwt_token>' }
+});
+
+// 1. 加入队列
+socket.emit('lobby:join', { stakeLevel: 'medium' });
+
+// 2. 等待匹配成功
+socket.on('game:start', (data) => {
+  console.log('游戏开始!', data.roomId);
+});
+
+// 3. 接收游戏状态并做出决策
+socket.on('game:state', (state) => {
+  if (state.isMyTurn) {
+    // 根据状态做出决策
+    const action = decideAction(state);
+    socket.emit('game:action', { action: action.type, amount: action.amount });
+  }
+});
+
+// 4. 一手牌结束，准备下一手
+socket.on('game:state', (state) => {
+  if (state.phase === 'SHOWDOWN' || state.phase === 'FINISHED') {
+    socket.emit('game:next');  // 发送准备信号
+  }
+});
+
+// 5. 接收准备进度
+socket.on('game:readyProgress', (data) => {
+  console.log(`准备进度: ${data.count}/${data.total}`);
+});
 ```
-WAITING → PRE_FLOP → FLOP → TURN → RIVER → SHOWDOWN → FINISHED
-                ↑                                           |
-                └───────────────────────────────────────────┘
+
+### 2. Bot 决策示例
+
+```javascript
+function decideAction(state) {
+  const actions = state.actions;
+  const player = state.players.find(p => p.isMe);
+  
+  // 简单策略：能跟注就跟注，不能就跟注就弃牌
+  if (actions.includes('call')) {
+    return { type: 'call', amount: 0 };
+  }
+  if (actions.includes('check')) {
+    return { type: 'check', amount: 0 };
+  }
+  return { type: 'fold', amount: 0 };
+}
 ```
-
-### 玩家操作
-
-| 操作 | 描述 | 条件 |
-|------|------|------|
-| `fold` | 弃牌 | 任何时候 |
-| `check` | 过牌 | 当前无需跟注 |
-| `call` | 跟注 | 当前有下注需要跟 |
-| `raise` | 加注 | 轮到自己操作 |
-| `allin` | 全下 | 有筹码 |
-
-### 盲注级别
-
-| 级别 | 小盲 | 大盲 | 最小买入 |
-|------|------|------|----------|
-| low | 5 | 10 | 200 |
-| medium | 10 | 20 | 400 |
-| high | 25 | 50 | 1000 |
 
 ---
 
 ## 错误码
 
-| HTTP 状态码 | 错误码 | 描述 |
-|-------------|--------|------|
-| 400 | INVALID_INPUT | 输入参数无效 |
-| 401 | UNAUTHORIZED | 未授权或 Token 无效 |
-| 403 | FORBIDDEN | 无权限执行此操作 |
-| 404 | NOT_FOUND | 资源不存在 |
-| 409 | CONFLICT | 资源冲突（如用户名已存在） |
-| 429 | RATE_LIMIT | 请求频率超限 |
-| 500 | INTERNAL_ERROR | 服务器内部错误 |
+| 错误码 | 说明 |
+|--------|------|
+| `AUTH_REQUIRED` | 需要认证 |
+| `AUTH_INVALID` | 认证无效 |
+| `INSUFFICIENT_CHIPS` | 筹码不足 |
+| `NOT_YOUR_TURN` | 不是你的回合 |
+| `INVALID_ACTION` | 无效操作 |
+| `ROOM_NOT_FOUND` | 房间不存在 |
+| `PLAYER_NOT_FOUND` | 玩家不存在 |
+| `GAME_NOT_STARTED` | 游戏未开始 |
+| `ALREADY_IN_QUEUE` | 已在队列中 |
 
 ---
 
-## 速率限制
+## 盲注级别配置
 
-| 认证方式 | 限制 |
-|----------|------|
-| JWT | 100 请求/分钟 |
-| API Key | 可自定义，默认 100 请求/分钟 |
-
----
-
-## 示例代码
-
-### JavaScript/Node.js
-
-```javascript
-const io = require('socket.io-client');
-
-// 使用 JWT 连接
-const socket = io('http://localhost:3001', {
-  auth: { token: 'your_jwt_token' }
-});
-
-// 或使用 API Key
-const socket = io('http://localhost:3001', {
-  auth: { apiKey: 'pk_your_api_key' }
-});
-
-// 监听游戏状态
-socket.on('game:state', (state) => {
-  console.log('Current phase:', state.phase);
-  console.log('Pot:', state.pot);
-  
-  if (state.currentPlayer === myPlayerId) {
-    // 轮到我操作
-    socket.emit('game:action', { action: 'call' });
-  }
-});
-
-// 加入大厅
-socket.emit('lobby:join', { stakeLevel: 'medium' });
-
-// 监听匹配成功
-socket.on('lobby:matched', (data) => {
-  console.log('Matched! Room:', data.roomId);
-});
-```
-
-### Python
-
-```python
-import socketio
-
-sio = socketio.Client()
-
-@sio.event
-def connect():
-    print('Connected!')
-    sio.emit('lobby:join', {'stakeLevel': 'medium'})
-
-@sio.on('game:state')
-def on_game_state(state):
-    print(f"Phase: {state['phase']}, Pot: {state['pot']}")
-    if state['currentPlayer'] == my_player_id:
-        sio.emit('game:action', {'action': 'call'})
-
-sio.connect('http://localhost:3001', 
-            auth={'token': 'your_jwt_token'})
-```
+| 级别 | 小盲注 | 大盲注 | 最低筹码要求 |
+|------|--------|--------|--------------|
+| low | 5 | 10 | 10 |
+| medium | 10 | 20 | 20 |
+| high | 25 | 50 | 50 |
 
 ---
 
-## 版本历史
+## 更新日志
 
-| 版本 | 日期 | 变更 |
-|------|------|------|
-| 1.0.0 | 2024-01-15 | 初始版本 |
+### 2026-03-19
+- 新增玩家连接状态模型（ONLINE/DISCONNECTED/REMOVED）
+- 统一断线重连逻辑
+- 更新游戏状态字段，新增 `connectionState`
+- 新增 `game:readyProgress` 事件
+- 新增 `game:busted` 事件
+- 新增 `game:reconnected` 事件

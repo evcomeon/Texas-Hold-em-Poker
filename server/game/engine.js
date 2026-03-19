@@ -5,8 +5,15 @@
 
 const { createDeck, shuffle, cardToString } = require('./deck');
 const { evaluateBest, compareHands } = require('./evaluator');
+const config = require('../config');
 
 const PHASES = ['WAITING', 'PRE_FLOP', 'FLOP', 'TURN', 'RIVER', 'SHOWDOWN', 'FINISHED'];
+
+const ConnectionState = {
+  ONLINE: 'online',
+  DISCONNECTED: 'disconnected',
+  REMOVED: 'removed',
+};
 
 class GameEngine {
   constructor(config = {}) {
@@ -31,20 +38,39 @@ class GameEngine {
     this.readyForNext = new Set();
     this.maxPlayers = 8;
     
-    this.turnTimeout = parseInt(process.env.TURN_TIMEOUT) || config.turnTimeout || 30;
+    this.turnTimeout = config.turnTimeout || config.turnTimeoutSeconds || 30;
     this.turnTimer = null;
     this.turnStartTime = null;
     this.onTimeoutCallback = null;
     
-    this.readyTimeout = parseInt(process.env.READY_TIMEOUT) || config.readyTimeout || 30;
+    this.readyTimeout = config.readyTimeout || config.readyTimeoutSeconds || 30;
     this.readyTimer = null;
     this.readyStartTime = null;
     this.onReadyTimeoutCallback = null;
+    this.onEventCallback = null;
   }
 
   _log(msg) {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     this.currentHandLog.push(`[${time}] ${msg}`);
+  }
+
+  setOnEventCallback(callback) {
+    this.onEventCallback = callback;
+  }
+
+  _emitEvent(eventType, fields = {}) {
+    if (!this.onEventCallback) return;
+
+    this.onEventCallback({
+      eventType,
+      phase: this.phase,
+      handNumber: this.handNumber,
+      pot: this.pot,
+      currentBet: this.currentBet,
+      communityCards: this.communityCards.map(cardToString),
+      ...fields,
+    });
   }
 
   // ── Initialization ──────────────────────────────────────────
@@ -54,7 +80,7 @@ class GameEngine {
       id: u.id,
       name: u.name || u.username,
       picture: u.picture,
-      chips: u.chips || 1000,
+      chips: u.chips || config.game.defaultStartingChips,
       holeCards: [],
       bet: 0,
       totalBet: 0,
@@ -63,6 +89,7 @@ class GameEngine {
       isDealer: false,
       isActive: true,
       disconnected: false,
+      connectionState: ConnectionState.ONLINE,
       isSpectator: false
     }));
     this.dealerIndex = 0;
@@ -98,12 +125,18 @@ class GameEngine {
       folded: false,
       allIn: false,
       isDealer: false,
-      isActive: playerChips >= this.bigBlind, // FIX: 需要至少大盲注才能参与
+      isActive: playerChips >= this.bigBlind,
       disconnected: false,
+      connectionState: ConnectionState.ONLINE,
       isSpectator: false
     });
     
     this._log(`${playerName} 加入桌子 (筹码: ${playerChips})`);
+    this._emitEvent('player_joined_table', {
+      userId: user.id,
+      playerName,
+      amount: playerChips,
+    });
     
     // 如果游戏在等待状态且人数够了，自动开始
     if (this.phase === 'WAITING' && this.players.length >= 2) {
@@ -113,19 +146,34 @@ class GameEngine {
     return true;
   }
   
-  // ── Remove Player (when disconnected) ────────────────────────
+  markPlayerRemoved(userId, reason = 'left') {
+    const player = this.players.find(p => p.id === userId);
+    if (!player) return false;
+    
+    player.connectionState = ConnectionState.REMOVED;
+    player.disconnected = true;
+    player.isActive = false;
+    
+    this._log(`${player.name} 离开了桌子 (${reason})`);
+    this._emitEvent('player_removed', {
+      userId: player.id,
+      playerName: player.name,
+      metadata: {
+        reason,
+        connectionState: player.connectionState,
+      },
+    });
+    
+    return true;
+  }
   
-  removePlayer(userId) {
+  _hardRemovePlayer(userId) {
     const idx = this.players.findIndex(p => p.id === userId);
     if (idx === -1) return false;
     
     const player = this.players[idx];
-    this._log(`${player.name} 离开了桌子`);
-    
-    // 从数组中移除
     this.players.splice(idx, 1);
     
-    // 调整当前玩家索引
     if (this.currentPlayerIndex >= idx && this.currentPlayerIndex > 0) {
       this.currentPlayerIndex--;
     }
@@ -137,6 +185,32 @@ class GameEngine {
     }
     
     return true;
+  }
+  
+  removePlayer(userId) {
+    return this.markPlayerRemoved(userId, 'removed');
+  }
+  
+  cleanupRemovedPlayers() {
+    const removedIds = this.players
+      .filter(p => p.connectionState === ConnectionState.REMOVED)
+      .map(p => p.id);
+    
+    for (const id of removedIds) {
+      this._hardRemovePlayer(id);
+    }
+    
+    return removedIds.length;
+  }
+  
+  _canPlayerAct(player) {
+    return player.isActive && 
+           player.connectionState !== ConnectionState.REMOVED &&
+           player.connectionState !== ConnectionState.DISCONNECTED;
+  }
+  
+  _isPlayerConnected(player) {
+    return player.connectionState === ConnectionState.ONLINE;
   }
   
   // ── Add Spectator ───────────────────────────────────────────
@@ -158,6 +232,8 @@ class GameEngine {
     this.currentHandLog = [];
     this.readyForNext.clear();
     this.clearReadyTimer();
+    
+    this.cleanupRemovedPlayers();
 
     // Reset player states
     for (const p of this.players) {
@@ -173,7 +249,7 @@ class GameEngine {
     }
 
     // Check if enough active players
-    const activePlayers = this.players.filter(p => p.isActive && !p.disconnected);
+    const activePlayers = this.players.filter(p => p.isActive && p.connectionState !== ConnectionState.REMOVED);
     if (activePlayers.length < 2) {
       this.phase = 'WAITING';
       this._log("等待更多玩家加入...");
@@ -220,6 +296,12 @@ class GameEngine {
     this._log(`庄家: ${this.players[this.dealerIndex].name}`);
     this._log(`小盲: ${this.players[sbIndex].name} (${this.smallBlind})`);
     this._log(`大盲: ${this.players[bbIndex].name} (${this.bigBlind})`);
+    this._emitEvent('hand_started', {
+      dealerUserId: this.players[this.dealerIndex].id,
+      dealerName: this.players[this.dealerIndex].name,
+      smallBlindUserId: this.players[sbIndex].id,
+      bigBlindUserId: this.players[bbIndex].id,
+    });
   }
 
   _postBlind(playerIndex, amount) {
@@ -289,13 +371,41 @@ class GameEngine {
     const p = this.players.find(x => x.id === userId);
     if (p) {
       p.disconnected = true;
+      p.connectionState = ConnectionState.DISCONNECTED;
       this._log(`${p.name} 掉线`);
+      this._emitEvent('player_disconnected', {
+        userId: p.id,
+        playerName: p.name,
+        metadata: {
+          connectionState: p.connectionState,
+        },
+      });
       
-      // Auto fold if it's their turn or they are non-folded
       if (!p.folded && this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED' && this.phase !== 'WAITING') {
          this.performAction(userId, 'fold');
       }
     }
+  }
+
+  handleReconnect(userId) {
+    const player = this.players.find((p) => p.id === userId);
+    if (!player) return false;
+    
+    if (player.connectionState === ConnectionState.REMOVED) {
+      return false;
+    }
+
+    player.disconnected = false;
+    player.connectionState = ConnectionState.ONLINE;
+    this._log(`${player.name} 已重连`);
+    this._emitEvent('player_reconnected', {
+      userId: player.id,
+      playerName: player.name,
+      metadata: {
+        connectionState: player.connectionState,
+      },
+    });
+    return true;
   }
 
   // ── Player Actions ──────────────────────────────────────────
@@ -386,8 +496,22 @@ class GameEngine {
         return { error: `未知操作: ${action}` };
     }
 
+    this._emitEvent('player_action', {
+      userId: player.id,
+      playerName: player.name,
+      action,
+      amount: action === 'raise' ? player.bet : action === 'call' ? player.bet : action === 'allin' ? player.totalBet : null,
+      playerSnapshot: {
+        chips: player.chips,
+        bet: player.bet,
+        totalBet: player.totalBet,
+        folded: player.folded,
+        allIn: player.allIn,
+      },
+    });
+
     // Check if only one player remains
-    const activePlayers = this.players.filter(p => p.isActive && !p.folded && !p.disconnected);
+    const activePlayers = this.players.filter(p => p.isActive && !p.folded && this._isPlayerConnected(p));
     if (activePlayers.length <= 1) {
       if (activePlayers.length === 1) {
         this._winByFold(activePlayers[0]);
@@ -413,8 +537,8 @@ class GameEngine {
     }
 
     // Check if all non-folded players have matched the bet or are all-in
-    const needAction = this.players.filter(p => p.isActive && !p.folded && !p.disconnected && !p.allIn && p.bet < this.currentBet);
-    const canAct = this.players.filter(p => p.isActive && !p.folded && !p.disconnected && !p.allIn);
+    const needAction = this.players.filter(p => this._canPlayerAct(p) && !p.folded && !p.allIn && p.bet < this.currentBet);
+    const canAct = this.players.filter(p => this._canPlayerAct(p) && !p.folded && !p.allIn);
 
     if (needAction.length === 0 && canAct.length <= 1 && this._hasEveryoneActed()) {
       this._advancePhase();
@@ -423,13 +547,12 @@ class GameEngine {
 
     this.currentPlayerIndex = next;
     
-    // 启动新回合计时器
     this.startTurnTimer();
   }
 
   _hasEveryoneActed() {
     return this.players.every(p =>
-      !p.isActive || p.folded || p.disconnected || p.allIn || p.bet === this.currentBet
+      !p.isActive || p.folded || !this._isPlayerConnected(p) || p.allIn || p.bet === this.currentBet
     );
   }
 
@@ -437,7 +560,7 @@ class GameEngine {
     let idx = (from + 1) % this.players.length;
     let count = 0;
     while (count < this.players.length) {
-      if (this.players[idx].isActive && !this.players[idx].disconnected) return idx;
+      if (this._isPlayerConnected(this.players[idx]) && this.players[idx].isActive) return idx;
       idx = (idx + 1) % this.players.length;
       count++;
     }
@@ -449,7 +572,7 @@ class GameEngine {
     let count = 0;
     while (count < this.players.length) {
       const p = this.players[idx];
-      if (p.isActive && !p.folded && !p.disconnected && !p.allIn) {
+      if (this._canPlayerAct(p) && !p.folded && !p.allIn) {
         return idx;
       }
       idx = (idx + 1) % this.players.length;
@@ -476,23 +599,26 @@ class GameEngine {
         this.phase = 'FLOP';
         this.communityCards.push(this.deck.pop(), this.deck.pop(), this.deck.pop());
         this._log(`翻牌: ${this.communityCards.map(cardToString).join(' ')}`);
+        this._emitEvent('phase_changed', { phase: this.phase });
         break;
       case 'FLOP':
         this.phase = 'TURN';
         this.communityCards.push(this.deck.pop());
         this._log(`转牌: ${cardToString(this.communityCards[3])}`);
+        this._emitEvent('phase_changed', { phase: this.phase });
         break;
       case 'TURN':
         this.phase = 'RIVER';
         this.communityCards.push(this.deck.pop());
         this._log(`河牌: ${cardToString(this.communityCards[4])}`);
+        this._emitEvent('phase_changed', { phase: this.phase });
         break;
       case 'RIVER':
         this._showdown();
         return;
     }
 
-    const canAct = this.players.filter(p => p.isActive && !p.folded && !p.disconnected && !p.allIn);
+    const canAct = this.players.filter(p => this._canPlayerAct(p) && !p.folded && !p.allIn);
     if (canAct.length <= 1) {
       this._runOutBoard();
       return;
@@ -523,7 +649,7 @@ class GameEngine {
 
   _showdown() {
     this.phase = 'SHOWDOWN';
-    const activePlayers = this.players.filter(p => p.isActive && !p.folded && !p.disconnected);
+    const activePlayers = this.players.filter(p => p.isActive && !p.folded && this._isPlayerConnected(p));
 
     const results = [];
     for (const p of activePlayers) {
@@ -577,6 +703,21 @@ class GameEngine {
         won: r.won || 0
       }))
     };
+
+    this._emitEvent('hand_showdown', {
+      winners: results.filter((r) => (r.won || 0) > 0).map((r) => ({
+        userId: r.playerId,
+        playerName: r.playerName,
+        hand: r.best.name,
+        won: r.won || 0,
+      })),
+      results: results.map((r) => ({
+        userId: r.playerId,
+        playerName: r.playerName,
+        hand: r.best.name,
+        won: r.won || 0,
+      })),
+    });
   }
 
   /**
@@ -690,25 +831,37 @@ class GameEngine {
     };
 
     this.phase = 'SHOWDOWN';
+    this._emitEvent('hand_won_by_fold', {
+      userId: winner.id,
+      playerName: winner.name,
+      action: 'win_by_fold',
+      amount: this.pot,
+    });
   }
 
   // ── Multiplayer Turn coordination ───────────────────────────
 
   playerRequestedNextHand(userId) {
-    // 如果已经开始新一手，不再处理准备请求
     if (this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED') {
       return { ready: false, count: 0, total: 0, error: '当前阶段不能准备' };
     }
     
     this.readyForNext.add(userId);
-    const activePlayers = this.players.filter(p => !p.disconnected && p.chips > 0);
+    const activePlayers = this.players.filter(p => this._isPlayerConnected(p) && p.chips > 0);
     const count = this.readyForNext.size;
     const total = activePlayers.length;
     
-    // 只计算活跃玩家的准备数量
     const readyActiveCount = activePlayers.filter(p => this.readyForNext.has(p.id)).length;
     
     this._log(`准备请求: ${userId}, 活跃玩家: ${activePlayers.map(p => p.name).join(',')}, 准备数: ${readyActiveCount}/${total}`);
+    this._emitEvent('player_ready_next_hand', {
+      userId,
+      amount: readyActiveCount,
+      metadata: {
+        readyCount: readyActiveCount,
+        activePlayerCount: total,
+      },
+    });
     
     // 如果活跃玩家不足2人，需要检查观战者是否有足够筹码
     if (activePlayers.length < 2) {
@@ -748,11 +901,17 @@ class GameEngine {
   }
 
   _handleReadyTimeout() {
-    const activePlayers = this.players.filter(p => !p.disconnected && p.chips > 0);
+    const activePlayers = this.players.filter(p => this._isPlayerConnected(p) && p.chips > 0);
     const notReadyPlayers = activePlayers.filter(p => !this.readyForNext.has(p.id));
     
     if (notReadyPlayers.length > 0) {
       this._log(`准备超时，以下玩家将被移除: ${notReadyPlayers.map(p => p.name).join(', ')}`);
+      this._emitEvent('ready_timeout', {
+        metadata: {
+          playerIds: notReadyPlayers.map((p) => p.id),
+          playerNames: notReadyPlayers.map((p) => p.name),
+        },
+      });
       
       if (this.onReadyTimeoutCallback) {
         this.onReadyTimeoutCallback(notReadyPlayers.map(p => p.id));
@@ -841,6 +1000,7 @@ class GameEngine {
         isDealer: p.isDealer,
         isActive: p.isActive,
         disconnected: p.disconnected,
+        connectionState: p.connectionState || ConnectionState.ONLINE,
         isMe: p.id === viewerUserId,
         originalIndex: idx,
         holeCards: canSeeHoleCards(p.id)

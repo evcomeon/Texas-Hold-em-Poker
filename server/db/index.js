@@ -4,24 +4,26 @@
 
 const { Pool } = require('pg');
 require('dotenv').config();
+const logger = require('../lib/logger');
+const config = require('../config');
 
 const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 5432,
-  database: process.env.DB_NAME || 'poker_game',
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD || 'postgres',
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  host: config.db.host,
+  port: config.db.port,
+  database: config.db.database,
+  user: config.db.user,
+  password: config.db.password,
+  max: config.db.max,
+  idleTimeoutMillis: config.db.idleTimeoutMs,
+  connectionTimeoutMillis: config.db.connectionTimeoutMs,
 });
 
 pool.on('connect', () => {
-  console.log('📊 PostgreSQL connected');
+  logger.info('db.connected');
 });
 
 pool.on('error', (err) => {
-  console.error('PostgreSQL connection error:', err);
+  logger.error('db.connection_error', { error: err });
 });
 
 async function query(text, params) {
@@ -29,7 +31,11 @@ async function query(text, params) {
   const res = await pool.query(text, params);
   const duration = Date.now() - start;
   if (duration > 100) {
-    console.log('Slow query:', { text: text.substring(0, 100), duration, rows: res.rowCount });
+    logger.warn('db.slow_query', {
+      sql: text.substring(0, 100),
+      durationMs: duration,
+      rowCount: res.rowCount,
+    });
   }
   return res;
 }

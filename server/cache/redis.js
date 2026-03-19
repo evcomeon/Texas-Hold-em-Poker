@@ -4,6 +4,8 @@
 
 const redis = require('redis');
 require('dotenv').config();
+const logger = require('../lib/logger');
+const config = require('../config');
 
 let redisClient = null;
 let isRedisConnected = false;
@@ -24,21 +26,21 @@ setInterval(cleanupMemoryCache, 60000);
 
 redisClient = redis.createClient({
   socket: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: process.env.REDIS_PORT || 6379,
+    host: config.redis.host,
+    port: config.redis.port,
     reconnectStrategy: (retries) => {
       if (retries > 3) {
-        console.log('⚠️ Redis unavailable, using in-memory cache');
+        logger.warn('redis.reconnect_aborted_using_memory_cache');
         return false;
       }
       return Math.min(retries * 100, 3000);
     },
   },
-  password: process.env.REDIS_PASSWORD || undefined,
+  password: config.redis.password,
 });
 
 redisClient.on('connect', () => {
-  console.log('🔴 Redis connected');
+  logger.info('redis.connected');
   isRedisConnected = true;
 });
 
@@ -54,7 +56,7 @@ async function connectRedis() {
       await redisClient.connect();
     }
   } catch (err) {
-    console.log('⚠️ Redis unavailable, using in-memory cache');
+    logger.warn('redis.unavailable_using_memory_cache', { error: err });
     isRedisConnected = false;
   }
 }

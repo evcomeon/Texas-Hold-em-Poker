@@ -5,8 +5,9 @@
 const express = require('express');
 const router = express.Router();
 const GameEngine = require('../game/engine');
+const config = require('../config');
 
-const game = new GameEngine();
+const game = new GameEngine(config.game);
 
 // Create a new game
 router.post('/game/new', (req, res) => {

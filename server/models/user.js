@@ -4,6 +4,7 @@
 // ============================================================
 
 const { query, getClient } = require('../db/index');
+const logger = require('../lib/logger');
 
 // 内存中的简单锁映射（生产环境应使用Redis分布式锁）
 const userLocks = new Map();
@@ -108,7 +109,10 @@ class UserModel {
     if (idempotencyKey) {
       const existingTx = await this.findTransactionByIdempotencyKey(idempotencyKey);
       if (existingTx) {
-        console.log(`[UserModel] Idempotency key already processed: ${idempotencyKey}`);
+        logger.info('user.balance_update_idempotent_hit', {
+          userId,
+          idempotencyKey,
+        });
         return {
           balanceBefore: existingTx.balance_before,
           balanceAfter: existingTx.balance_after,

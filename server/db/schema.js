@@ -3,9 +3,10 @@
 // ============================================================
 
 const { query } = require('./index');
+const logger = require('../lib/logger');
 
 async function initializeDatabase() {
-  console.log('🔧 Initializing database schema...');
+  logger.info('db.schema_init_started');
 
   // 用户表
   await query(`
@@ -63,6 +64,25 @@ async function initializeDatabase() {
     );
   `);
 
+  await query(`
+    CREATE TABLE IF NOT EXISTS game_action_logs (
+      id SERIAL PRIMARY KEY,
+      room_id VARCHAR(100) NOT NULL,
+      hand_number INTEGER,
+      stake_level VARCHAR(20),
+      phase VARCHAR(20),
+      event_type VARCHAR(50) NOT NULL,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      player_name VARCHAR(50),
+      action VARCHAR(50),
+      amount INTEGER,
+      pot INTEGER,
+      current_bet INTEGER,
+      metadata JSONB DEFAULT '{}'::jsonb,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
   // 充值记录表
   await query(`
     CREATE TABLE IF NOT EXISTS transactions (
@@ -91,6 +111,11 @@ async function initializeDatabase() {
   await query(`CREATE INDEX IF NOT EXISTS idx_game_records_created_at ON game_records(created_at);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_game_participants_user_id ON game_participants(user_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_game_participants_game_record_id ON game_participants(game_record_id);`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_game_action_logs_room_id ON game_action_logs(room_id);`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_game_action_logs_hand_number ON game_action_logs(hand_number);`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_game_action_logs_user_id ON game_action_logs(user_id);`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_game_action_logs_event_type ON game_action_logs(event_type);`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_game_action_logs_created_at ON game_action_logs(created_at);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at);`);
 
@@ -173,7 +198,7 @@ async function initializeDatabase() {
   await query(`CREATE INDEX IF NOT EXISTS idx_wallet_bind_nonces_user_id ON wallet_bind_nonces(user_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_wallet_bind_nonces_expires ON wallet_bind_nonces(expires_at);`);
 
-  console.log('✅ Database schema initialized');
+  logger.info('db.schema_init_completed');
 }
 
 async function dropAllTables() {

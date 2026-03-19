@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const ApiKeyModel = require('../models/apiKey');
 const { verifyJWT } = require('../auth');
+const logger = require('../lib/logger');
 
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -42,7 +43,7 @@ router.get('/', authMiddleware, async (req, res) => {
     const keys = await ApiKeyModel.findByUserId(req.user.id);
     res.json({ keys });
   } catch (err) {
-    console.error('List API keys error:', err);
+    logger.error('api_keys.list_failed', { userId: req.user.id, error: err });
     res.status(500).json({ error: 'Failed to list API keys' });
   }
 });
@@ -78,7 +79,7 @@ router.post('/', authMiddleware, async (req, res) => {
       expiresAt: key.expires_at
     });
   } catch (err) {
-    console.error('Create API key error:', err);
+    logger.error('api_keys.create_failed', { userId: req.user.id, error: err });
     res.status(500).json({ error: 'Failed to create API key' });
   }
 });
@@ -97,7 +98,7 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     }
     res.json({ message: 'API key deleted' });
   } catch (err) {
-    console.error('Delete API key error:', err);
+    logger.error('api_keys.delete_failed', { userId: req.user.id, keyId, error: err });
     res.status(500).json({ error: 'Failed to delete API key' });
   }
 });
@@ -116,7 +117,7 @@ router.post('/:id/deactivate', authMiddleware, async (req, res) => {
     }
     res.json({ message: 'API key deactivated' });
   } catch (err) {
-    console.error('Deactivate API key error:', err);
+    logger.error('api_keys.deactivate_failed', { userId: req.user.id, keyId, error: err });
     res.status(500).json({ error: 'Failed to deactivate API key' });
   }
 });

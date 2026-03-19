@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const WalletModel = require('../models/wallet');
-const { generateToken, verifyJWT } = require('../auth');
+const { generateJWT, verifyJWT } = require('../auth');
+const logger = require('../lib/logger');
 
 const NONCE_EXPIRE_SECONDS = 300;
 
@@ -42,7 +43,7 @@ router.post('/nonce', async (req, res) => {
     res.json({ message, nonce });
     
   } catch (error) {
-    console.error('Get nonce error:', error);
+    logger.error('wallet.get_nonce_failed', { error });
     res.status(500).json({ error: '获取 nonce 失败' });
   }
 });
@@ -75,7 +76,7 @@ router.post('/login', async (req, res) => {
     
     const user = await WalletModel.createOrLoginUser(walletAddress);
     
-    const token = generateToken({
+    const token = generateJWT({
       id: user.id || user.user_id,
       username: user.username,
       walletAddress: walletAddress
@@ -92,7 +93,7 @@ router.post('/login', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Wallet login error:', error);
+    logger.error('wallet.login_failed', { error });
     res.status(500).json({ error: error.message || '登录失败' });
   }
 });
@@ -135,7 +136,7 @@ router.post('/bind/nonce', authMiddleware, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Get bind nonce error:', error);
+    logger.error('wallet.bind_nonce_failed', { userId: req.user.id, error });
     res.status(500).json({ error: '获取绑定 nonce 失败' });
   }
 });
@@ -197,7 +198,7 @@ router.post('/bind/verify', authMiddleware, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Bind wallet error:', error);
+    logger.error('wallet.bind_verify_failed', { userId: req.user.id, error });
     res.status(500).json({ error: error.message || '绑定失败' });
   }
 });

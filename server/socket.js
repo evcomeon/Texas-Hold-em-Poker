@@ -6,12 +6,26 @@ const socketIo = require('socket.io');
 const { verifyJWT } = require('./auth');
 const LobbyManager = require('./lobby');
 const UserModel = require('./models/user');
+const ApiKeyModel = require('./models/apiKey');
+const GameActionLogModel = require('./models/gameActionLog');
+const logger = require('./lib/logger');
 
 let redisCache = null;
 try {
   redisCache = require('./cache/redis');
 } catch (e) {
-  console.log('Redis cache not available');
+  logger.warn('redis.module_not_available', { error: e });
+}
+
+function persistGameActionLog(payload) {
+  GameActionLogModel.create(payload).catch((error) => {
+    logger.error('game_action_log.persist_failed', {
+      roomId: payload.roomId,
+      handNumber: payload.handNumber,
+      eventType: payload.eventType,
+      error,
+    });
+  });
 }
 
 async function saveChipsToDatabase(room) {
@@ -24,7 +38,7 @@ async function saveChipsToDatabase(room) {
     try {
       await UserModel.updateChips(player.id, player.chips);
     } catch (e) {
-      console.error(`Failed to save chips for player ${player.id}:`, e);
+      logger.error('game.save_chips_failed', { userId: player.id, error: e });
     }
   }
 }
@@ -40,26 +54,58 @@ function configureSockets(server) {
   const lobby = new LobbyManager();
 
   // Middleware for authentication
-  io.use((socket, next) => {
-    const token = socket.handshake.auth.token;
-    const jwtSecret = process.env.JWT_SECRET || 'super_secret_poker_key_2026';
-    console.log('[Socket Auth] Token received:', token ? token.substring(0, 50) + '...' : 'none');
-    console.log('[Socket Auth] JWT_SECRET:', jwtSecret);
-    if (!token) return next(new Error('Authentication error'));
-    
-    try {
-      const jwt = require('jsonwebtoken');
-      const decoded = jwt.verify(token, jwtSecret);
-      console.log('[Socket Auth] Decoded user:', decoded);
-      socket.user = decoded;
-      next();
-    } catch (err) {
-      console.log('[Socket Auth] Error:', err.message);
-      next(new Error('Authentication error'));
+  io.use(async (socket, next) => {
+    const { token, apiKey } = socket.handshake.auth || {};
+
+    if (token) {
+      try {
+        const decoded = verifyJWT(token);
+        socket.user = decoded;
+        socket.authType = 'jwt';
+        return next();
+      } catch (err) {
+        logger.warn('socket.auth.jwt_failed', { error: err });
+      }
     }
+
+    if (apiKey) {
+      try {
+        const validation = await ApiKeyModel.validateKey(apiKey);
+        if (!validation.valid) {
+          return next(new Error(validation.error || 'Authentication error'));
+        }
+
+        const permissions = Array.isArray(validation.keyData.permissions)
+          ? validation.keyData.permissions
+          : JSON.parse(validation.keyData.permissions || '[]');
+
+        if (!permissions.includes('game') && !permissions.includes('write')) {
+          return next(new Error('API key missing game permission'));
+        }
+
+        socket.user = {
+          id: validation.keyData.userId,
+          username: validation.keyData.username,
+          name: validation.keyData.username,
+        };
+        socket.authType = 'apikey';
+        socket.apiKey = validation.keyData;
+        return next();
+      } catch (err) {
+        logger.warn('socket.auth.apikey_failed', { error: err });
+      }
+    }
+
+    return next(new Error('Authentication error'));
   });
 
   io.on('connection', async (socket) => {
+    logger.info('socket.connected', {
+      socketId: socket.id,
+      userId: socket.user.id,
+      authType: socket.authType,
+    });
+
     // Add to managed users
     lobby.connectedUsers.set(socket.id, { user: socket.user, socket, roomId: null, isSpectator: false });
     
@@ -68,12 +114,15 @@ function configureSockets(server) {
       try {
         const savedState = await redisCache.getUserGameState(socket.user.id);
         if (savedState && savedState.roomId) {
-          const room = lobby.activeGames.get(savedState.roomId);
-          if (room) {
-            // 恢复用户到房间
-            lobby.connectedUsers.get(socket.id).roomId = savedState.roomId;
-            lobby.connectedUsers.get(socket.id).isSpectator = savedState.isSpectator || false;
-            
+          const restoreResult = lobby.handleReconnect(
+            socket.user,
+            socket,
+            savedState.roomId,
+            savedState.isSpectator || false
+          );
+
+          if (restoreResult.restored) {
+            const room = restoreResult.room;
             socket.join(savedState.roomId);
             socket.emit('game:reconnected', { 
               roomId: savedState.roomId,
@@ -86,10 +135,12 @@ function configureSockets(server) {
             
             // 清除保存的状态
             await redisCache.deleteUserGameState(socket.user.id);
+          } else if (restoreResult.reason === 'room_not_found') {
+            await redisCache.deleteUserGameState(socket.user.id);
           }
         }
       } catch (e) {
-        console.error('Reconnect error:', e);
+        logger.error('socket.reconnect_failed', { userId: socket.user.id, error: e });
       }
     }
     
@@ -100,6 +151,11 @@ function configureSockets(server) {
     
     socket.on('lobby:join', async (data = {}) => {
       const stakeLevel = data.stakeLevel || 'medium';
+      logger.info('socket.lobby_join', {
+        socketId: socket.id,
+        userId: socket.user.id,
+        stakeLevel,
+      });
       const isQueued = await lobby.joinQueue(socket.user, socket, (roomId, players, engine, isSpectator, isNewJoin) => {
         // A match was found or joined as spectator!
         players.forEach(p => {
@@ -169,6 +225,12 @@ function configureSockets(server) {
       } else if (isQueued && isQueued.error) {
         // 筹码不足
         socket.emit('lobby:error', isQueued);
+        logger.warn('socket.lobby_join_rejected', {
+          socketId: socket.id,
+          userId: socket.user.id,
+          stakeLevel,
+          reason: isQueued.error,
+        });
       }
     });
 
@@ -188,11 +250,38 @@ function configureSockets(server) {
       if (!room) return;
 
       const engine = room.engine;
+      const stateBefore = engine.getState(socket.user.id);
       const state = engine.performAction(socket.user.id, action, amount);
 
       if (state.error) {
         socket.emit('game:error', state);
+        logger.warn('socket.game_action_rejected', {
+          roomId,
+          userId: socket.user.id,
+          action,
+          amount: amount || null,
+          error: state.error,
+        });
       } else {
+        persistGameActionLog({
+          roomId,
+          handNumber: state.handNumber,
+          stakeLevel: room.stakeLevel,
+          phase: state.phase,
+          eventType: 'player_action',
+          userId: socket.user.id,
+          playerName: socket.user.username || socket.user.name,
+          action,
+          amount: typeof amount === 'number' ? amount : null,
+          pot: state.pot,
+          currentBet: state.currentBet,
+          metadata: {
+            previousPhase: stateBefore.phase,
+            previousPot: stateBefore.pot,
+            previousCurrentBet: stateBefore.currentBet,
+          },
+        });
+
         // Broadcast new state to all players and spectators in the room
         await broadcastToRoom(io, roomId, room, lobby);
       }
@@ -210,6 +299,19 @@ function configureSockets(server) {
 
       const engine = room.engine;
       const result = engine.playerRequestedNextHand(socket.user.id);
+      persistGameActionLog({
+        roomId,
+        handNumber: engine.handNumber,
+        stakeLevel: room.stakeLevel,
+        phase: engine.phase,
+        eventType: 'player_ready_next_hand',
+        userId: socket.user.id,
+        playerName: socket.user.username || socket.user.name,
+        action: 'next',
+        pot: engine.pot,
+        currentBet: engine.currentBet,
+        metadata: result,
+      });
       
       // 通知所有人准备进度
       await broadcastToRoom(io, roomId, room, lobby, 'game:readyProgress', {
@@ -284,9 +386,29 @@ function configureSockets(server) {
           d.socket.emit('game:chat', message);
         }
       }
+
+      persistGameActionLog({
+        roomId,
+        handNumber: room.engine.handNumber,
+        stakeLevel: room.stakeLevel,
+        phase: room.engine.phase,
+        eventType: 'chat_message',
+        userId: socket.user.id,
+        playerName: socket.user.name,
+        action: 'chat',
+        pot: room.engine.pot,
+        currentBet: room.engine.currentBet,
+        metadata: {
+          text: message.text,
+        },
+      });
     });
 
     socket.on('disconnect', async () => {
+      logger.info('socket.disconnected', {
+        socketId: socket.id,
+        userId: socket.user.id,
+      });
       const data = lobby.onDisconnect(socket.id);
       if (data && data.roomId) {
         const room = lobby.activeGames.get(data.roomId);
@@ -305,10 +427,15 @@ function configureSockets(server) {
               try {
                 await redisCache.cacheUserGameState(data.user.id, data.roomId, {
                   phase: room.engine.phase,
-                  isSpectator: false
+                  isSpectator: false,
+                  connectionState: 'disconnected',
                 });
               } catch (e) {
-                console.error('Failed to save game state:', e);
+                logger.error('socket.cache_game_state_failed', {
+                  roomId: data.roomId,
+                  userId: data.user.id,
+                  error: e,
+                });
               }
             }
             
@@ -329,8 +456,6 @@ function configureSockets(server) {
   
   // Helper: 广播房间状态给所有玩家和观战者
   async function broadcastToRoom(io, roomId, room, lobby, eventName = 'game:state', extraData = null) {
-    const allUserIds = [...room.players.map(p => p.id), ...room.spectators];
-    
     // 如果游戏进入 SHOWDOWN 阶段，保存筹码到数据库并启动准备计时器
     if (room.engine.phase === 'SHOWDOWN' && !room.chipsSaved) {
       room.chipsSaved = true;

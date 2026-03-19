@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "node --watch index.js",
+    "tournament:create-accounts": "node create-tournament-accounts.js",
+    "tournament:run": "node run-tournament.js"
   },
   "dependencies": {
     "jsonwebtoken": "^9.0.3",

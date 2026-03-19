@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const UserModel = require('../models/user');
+const logger = require('../lib/logger');
 
 router.get('/', async (req, res) => {
   try {
@@ -32,7 +33,7 @@ router.get('/', async (req, res) => {
       leaderboard: result
     });
   } catch (err) {
-    console.error('Leaderboard error:', err);
+    logger.error('leaderboard.fetch_failed', { type: req.query.type || 'chips', error: err });
     res.status(500).json({ error: '获取排行榜失败' });
   }
 });
@@ -56,7 +57,7 @@ router.get('/chips', async (req, res) => {
     
     res.json({ type: 'chips', leaderboard: result });
   } catch (err) {
-    console.error('Leaderboard error:', err);
+    logger.error('leaderboard.chips_failed', { error: err });
     res.status(500).json({ error: '获取筹码榜失败' });
   }
 });
@@ -89,7 +90,7 @@ router.get('/winrate', async (req, res) => {
     
     res.json({ type: 'winrate', leaderboard });
   } catch (err) {
-    console.error('Leaderboard error:', err);
+    logger.error('leaderboard.winrate_failed', { error: err });
     res.status(500).json({ error: '获取胜率榜失败' });
   }
 });
