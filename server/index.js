@@ -49,17 +49,22 @@ const io = configureSockets(server);
 // Initialize Database and Start Server
 async function startServer() {
   try {
+    logger.info('server.starting');
+    
     // 初始化数据库
     const { initializeDatabase } = require('./db/schema');
     await initializeDatabase();
+    logger.info('db.initialized');
     
-    // 连接 Redis (可选)
-    try {
-      const { connectRedis } = require('./cache/redis');
-      await connectRedis();
-    } catch (redisError) {
-      logger.warn('redis.unavailable', { error: redisError });
-    }
+    // 连接 Redis (可选，不阻塞)
+    setImmediate(async () => {
+      try {
+        const { connectRedis } = require('./cache/redis');
+        await connectRedis();
+      } catch (redisError) {
+        logger.warn('redis.unavailable', { error: redisError });
+      }
+    });
     
     // 启动订单验证服务 (异步，不阻塞启动)
     setImmediate(async () => {
@@ -74,7 +79,7 @@ async function startServer() {
     });
     
     server.listen(PORT, '0.0.0.0', () => {
-      logger.info('server.started', { port: PORT });
+      logger.info('server.started', { port: PORT, host: '0.0.0.0' });
     });
   } catch (error) {
     logger.error('server.start_failed', { error });
