@@ -43,9 +43,9 @@ const config = {
     database: getString('DB_NAME', getString('PGDATABASE', 'poker_game')),
     user: getString('DB_USER', getString('PGUSER', 'postgres')),
     password: getString('DB_PASSWORD', getString('PGPASSWORD', 'postgres')),
-    max: getInt('DB_POOL_MAX', 20),
+    max: getInt('DB_POOL_MAX', 10),
     idleTimeoutMs: getInt('DB_IDLE_TIMEOUT_MS', 30000),
-    connectionTimeoutMs: getInt('DB_CONNECTION_TIMEOUT_MS', 2000),
+    connectionTimeoutMs: getInt('DB_CONNECTION_TIMEOUT_MS', 5000),
   },
   redis: {
     host: getString('REDIS_HOST', 'localhost'),
