@@ -405,12 +405,14 @@ function hideDisconnectOverlay() {
 
 // ── WebSockets ────────────────────────────────────────────────
 function connectSocket() {
-  // Connect to the WebSocket server using the environment variable or fallback to standard path
   const socketAuth = { token };
-  const wsUrl = import.meta.env.VITE_WS_URL || ''; // If empty, defaults to current host (good for dev proxy)
+  const wsUrl = import.meta.env.VITE_WS_URL || '';
+  const socketPath = import.meta.env.VITE_SOCKET_PATH || '/socket.io';
   
   const socketOptions = {
+    path: socketPath,
     auth: socketAuth,
+    transports: ['websocket', 'polling'],
     reconnection: true,
     reconnectionAttempts: 10,
     reconnectionDelay: 1000,
