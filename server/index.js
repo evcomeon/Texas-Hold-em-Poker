@@ -61,15 +61,17 @@ async function startServer() {
       logger.warn('redis.unavailable', { error: redisError });
     }
     
-    // 启动订单验证服务
-    try {
-      const orderVerifier = require('./services/orderVerifier');
-      await orderVerifier.initialize();
-      orderVerifier.start();
-      logger.info('order_verifier.started');
-    } catch (verifierError) {
-      logger.warn('order_verifier.not_started', { error: verifierError });
-    }
+    // 启动订单验证服务 (异步，不阻塞启动)
+    setImmediate(async () => {
+      try {
+        const orderVerifier = require('./services/orderVerifier');
+        await orderVerifier.initialize();
+        orderVerifier.start();
+        logger.info('order_verifier.started');
+      } catch (verifierError) {
+        logger.warn('order_verifier.not_started', { error: verifierError });
+      }
+    });
     
     server.listen(PORT, '0.0.0.0', () => {
       logger.info('server.started', { port: PORT });
