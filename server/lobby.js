@@ -78,6 +78,8 @@ class LobbyManager {
   }
 
   async joinQueue(user, socket, roomIdRefCb, stakeLevel = 'medium') {
+    const startTime = Date.now();
+    
     // 验证盲注级别
     if (!this.STAKE_LEVELS[stakeLevel]) {
       stakeLevel = 'medium';
@@ -90,6 +92,7 @@ class LobbyManager {
       username: user.username,
       stakeLevel,
       queueLength: queue.length,
+      elapsedMs: Date.now() - startTime,
     });
     if (queue.find(u => u.id === user.id)) {
       logger.warn('lobby.already_queued', { userId: user.id, stakeLevel });
@@ -97,21 +100,26 @@ class LobbyManager {
     }
     
     // 检查用户是否已经在某个房间（断开重连的情况）
+    const findStart = Date.now();
     const existingData = this._findUserDataById(user.id);
+    logger.info('lobby.find_user_data', { userId: user.id, elapsedMs: Date.now() - findStart });
+    
     if (existingData && existingData.roomId) {
       // 用户之前在某个房间，先离开那个房间
       this._leaveRoom(user.id, existingData.roomId);
     }
 
     // 在进入队列前同步最新筹码，避免余额不足的用户抢先进队后又被转成观战者
+    const dbStart = Date.now();
     try {
       const dbUser = await UserModel.findById(user.id);
       if (dbUser) {
         user.chips = dbUser.chips_balance;
         user.picture = dbUser.avatar_url || user.picture;
       }
+      logger.info('lobby.db_fetch_chips', { userId: user.id, elapsedMs: Date.now() - dbStart });
     } catch (e) {
-      logger.error('lobby.fetch_chips_before_queue_failed', { userId: user.id, error: e });
+      logger.error('lobby.fetch_chips_before_queue_failed', { userId: user.id, error: e, elapsedMs: Date.now() - dbStart });
     }
 
     const minRequiredChips = this.STAKE_LEVELS[stakeLevel].bigBlind;
@@ -133,6 +141,7 @@ class LobbyManager {
       stakeLevel,
       queueLength: queue.length,
       chips: user.chips || 0,
+      totalElapsedMs: Date.now() - startTime,
     });
     
     // Attach socket
@@ -278,6 +287,7 @@ class LobbyManager {
   }
 
   _checkQueue(roomIdRefCb, stakeLevel = 'medium') {
+    const checkStart = Date.now();
     const queue = this.waitingQueue.get(stakeLevel);
     const stakeConfig = this.STAKE_LEVELS[stakeLevel];
     
@@ -288,6 +298,7 @@ class LobbyManager {
     });
     
     // 1. 先把用户填进还没开打或已结束、但仍有玩家空位的同级别桌子。
+    let fillCount = 0;
     while (queue.length > 0) {
       const openRoomEntry = this._findOpenPlayerRoom(stakeLevel);
       if (!openRoomEntry) break;
@@ -295,6 +306,9 @@ class LobbyManager {
       const [roomId, room] = openRoomEntry;
       const player = queue.shift();
       if (!player) break;
+      
+      fillCount++;
+      const fillStart = Date.now();
 
       room.players.push(player);
       room.engine.addPlayer(player);
@@ -314,19 +328,25 @@ class LobbyManager {
       if (room.engine.phase !== 'WAITING') {
         this._broadcastToRoom(roomId, room);
       }
+      
+      logger.info('lobby.fill_room', { roomId, playerId: player.id, elapsedMs: Date.now() - fillStart });
     }
 
     // 2. 只要队列里还够开桌，就持续创建新桌，避免所有后续玩家都被塞成第一桌观战者。
+    let createCount = 0;
     while (queue.length >= this.MIN_PLAYERS) {
+      const createStart = Date.now();
       const initialPlayerCount = Math.min(queue.length, this.MAX_PLAYERS);
       const players = queue.splice(0, initialPlayerCount);
       if (players.length === 0) break;
 
       const roomId = this._createRoomWithPlayers(players, stakeLevel, stakeConfig, roomIdRefCb);
+      createCount++;
       logger.info('lobby.room_created', {
         roomId,
         stakeLevel,
         playerCount: players.length,
+        elapsedMs: Date.now() - createStart,
       });
     }
 

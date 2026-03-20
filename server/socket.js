@@ -155,6 +155,7 @@ function configureSockets(server) {
     // ── Lobby Actions ──────────────────────────────────
     
     socket.on('lobby:join', async (data = {}) => {
+      const eventStart = Date.now();
       const stakeLevel = data.stakeLevel || 'medium';
       logger.info('socket.lobby_join', {
         socketId: socket.id,
@@ -162,6 +163,7 @@ function configureSockets(server) {
         stakeLevel,
       });
       const isQueued = await lobby.joinQueue(socket.user, socket, (roomId, players, engine, isSpectator, isNewJoin) => {
+        const callbackStart = Date.now();
         // A match was found or joined as spectator!
         players.forEach(p => {
           let pSocket = null;
@@ -221,7 +223,15 @@ function configureSockets(server) {
             });
           }
         }
+        logger.info('socket.lobby_join_callback', { roomId, playerCount: players.length, isSpectator, elapsedMs: Date.now() - callbackStart });
       }, stakeLevel);
+      
+      logger.info('socket.lobby_join_complete', { 
+        userId: socket.user.id, 
+        stakeLevel, 
+        result: isQueued,
+        totalElapsedMs: Date.now() - eventStart 
+      });
       
       // 处理返回值
       if (isQueued === true) {
