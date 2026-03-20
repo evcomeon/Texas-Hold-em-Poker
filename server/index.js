@@ -71,7 +71,7 @@ async function startServer() {
       logger.warn('order_verifier.not_started', { error: verifierError });
     }
     
-    server.listen(PORT, () => {
+    server.listen(PORT, '0.0.0.0', () => {
       logger.info('server.started', { port: PORT });
     });
   } catch (error) {
