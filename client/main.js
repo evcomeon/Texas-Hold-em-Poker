@@ -2,6 +2,8 @@
 // Texas Hold'em Poker - Frontend Multiplayer Client
 // ============================================================
 
+import { walletConnector } from './wallet.js';
+
 const API = import.meta.env.VITE_API_URL || '/api';
 
 // ── State ─────────────────────────────────────────────────────

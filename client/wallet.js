@@ -323,7 +323,8 @@ class WalletConnector {
 // 创建全局实例
 const walletConnector = new WalletConnector();
 
-// 导出
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { WalletConnector, walletConnector };
-}
+// 挂载到 window 对象
+window.WalletConnector = WalletConnector;
+window.walletConnector = walletConnector;
+
+export { WalletConnector, walletConnector };
