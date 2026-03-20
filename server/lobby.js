@@ -686,6 +686,8 @@ class LobbyManager {
       }
     }
     
+    room.engine.cleanupRemovedPlayers();
+    
     const activePlayers = room.players.filter(p => p.connectionState !== 'removed' && p.chips > 0);
     if (activePlayers.length < 2) {
       room.engine.phase = 'FINISHED';
@@ -698,10 +700,19 @@ class LobbyManager {
         }
       }
     } else {
-      // 继续游戏，开始新一手
+      room.engine.readyForNext.clear();
+      for (const p of activePlayers) {
+        room.engine.readyForNext.add(p.id);
+      }
+      
+      room.engine.clearReadyTimer();
       room.engine.startNewHand();
+      
       for (const [sId, data] of this.connectedUsers.entries()) {
         if (data.roomId === roomId) {
+          data.socket.emit('game:notification', {
+            msg: '准备超时玩家已移除，新一手牌开始'
+          });
           data.socket.emit('game:state', room.engine.getState(data.user.id));
         }
       }

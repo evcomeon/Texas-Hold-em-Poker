@@ -44,10 +44,15 @@ async function saveChipsToDatabase(room) {
 }
 
 function configureSockets(server) {
+  const corsOrigins = process.env.CORS_ORIGINS 
+    ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
+    : '*';
+  
   const io = socketIo(server, {
     cors: {
-      origin: "*",
-      methods: ["GET", "POST"]
+      origin: corsOrigins,
+      methods: ["GET", "POST"],
+      credentials: true
     }
   });
 
