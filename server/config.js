@@ -58,6 +58,7 @@ const config = {
     defaultStartingChips: getInt('GAME_DEFAULT_STARTING_CHIPS', 1000),
     turnTimeoutSeconds: getInt('TURN_TIMEOUT', 30),
     readyTimeoutSeconds: getInt('READY_TIMEOUT', 30),
+    disconnectTimeoutSeconds: getInt('DISCONNECT_TIMEOUT', 60),
     stakeLevels: {
       low: {
         smallBlind: getInt('LOW_SMALL_BLIND', 5),

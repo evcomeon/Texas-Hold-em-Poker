@@ -424,6 +424,10 @@ class LobbyManager {
       this._onReadyTimeout(roomId, playerIds);
     });
 
+    engine.setOnDisconnectTimeoutCallback((playerId) => {
+      this._onDisconnectTimeout(roomId, playerId);
+    });
+
     engine.setOnEventCallback((event) => {
       logger.info('game.engine_event', {
         roomId,
@@ -732,6 +736,38 @@ class LobbyManager {
         if (data.roomId === roomId) {
           data.socket.emit('game:notification', {
             msg: '准备超时玩家已移除，新一手牌开始'
+          });
+          data.socket.emit('game:state', room.engine.getState(data.user.id));
+        }
+      }
+    }
+  }
+  
+  _onDisconnectTimeout(roomId, playerId) {
+    const room = this.activeGames.get(roomId);
+    if (!room) return;
+    
+    logger.warn('lobby.disconnect_timeout', { roomId, playerId });
+    
+    const player = room.engine.players.find(p => p.id === playerId);
+    if (!player) return;
+    
+    for (const [sId, data] of this.connectedUsers.entries()) {
+      if (data.roomId === roomId) {
+        data.socket.emit('game:notification', {
+          msg: `${player.name} 掉线超时，已被移除`
+        });
+        data.socket.emit('game:state', room.engine.getState(data.user.id));
+      }
+    }
+    
+    const activePlayers = room.engine.players.filter(p => p.connectionState !== 'removed' && p.chips > 0);
+    if (activePlayers.length < 2) {
+      room.engine.phase = 'FINISHED';
+      for (const [sId, data] of this.connectedUsers.entries()) {
+        if (data.roomId === roomId) {
+          data.socket.emit('game:notification', {
+            msg: '玩家不足，游戏结束'
           });
           data.socket.emit('game:state', room.engine.getState(data.user.id));
         }

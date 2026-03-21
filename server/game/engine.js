@@ -47,6 +47,11 @@ class GameEngine {
     this.readyTimer = null;
     this.readyStartTime = null;
     this.onReadyTimeoutCallback = null;
+    
+    this.disconnectTimeout = config.disconnectTimeout || config.disconnectTimeoutSeconds || 60;
+    this.disconnectTimers = new Map();
+    this.onDisconnectTimeoutCallback = null;
+    
     this.onEventCallback = null;
   }
 
@@ -302,6 +307,8 @@ class GameEngine {
       smallBlindUserId: this.players[sbIndex].id,
       bigBlindUserId: this.players[bbIndex].id,
     });
+
+    this.startTurnTimer();
   }
 
   _postBlind(playerIndex, amount) {
@@ -384,7 +391,44 @@ class GameEngine {
       if (!p.folded && this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED' && this.phase !== 'WAITING') {
          this.performAction(userId, 'fold');
       }
+      
+      this.startDisconnectTimer(userId);
     }
+  }
+
+  startDisconnectTimer(userId) {
+    this.clearDisconnectTimer(userId);
+    
+    const timer = setTimeout(() => {
+      this._handleDisconnectTimeout(userId);
+    }, this.disconnectTimeout * 1000);
+    
+    this.disconnectTimers.set(userId, timer);
+  }
+
+  clearDisconnectTimer(userId) {
+    if (this.disconnectTimers.has(userId)) {
+      clearTimeout(this.disconnectTimers.get(userId));
+      this.disconnectTimers.delete(userId);
+    }
+  }
+
+  _handleDisconnectTimeout(userId) {
+    const player = this.players.find(p => p.id === userId);
+    if (!player || player.connectionState !== ConnectionState.DISCONNECTED) {
+      return;
+    }
+    
+    this._log(`${player.name} 掉线超时，自动移除`);
+    this.markPlayerRemoved(userId, 'disconnect_timeout');
+    
+    if (this.onDisconnectTimeoutCallback) {
+      this.onDisconnectTimeoutCallback(userId);
+    }
+  }
+
+  setOnDisconnectTimeoutCallback(callback) {
+    this.onDisconnectTimeoutCallback = callback;
   }
 
   handleReconnect(userId) {
@@ -397,6 +441,7 @@ class GameEngine {
 
     player.disconnected = false;
     player.connectionState = ConnectionState.ONLINE;
+    this.clearDisconnectTimer(userId);
     this._log(`${player.name} 已重连`);
     this._emitEvent('player_reconnected', {
       userId: player.id,
