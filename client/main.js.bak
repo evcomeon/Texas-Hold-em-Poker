@@ -691,16 +691,22 @@ function renderHeader() {
 }
 
 function renderPlayers() {
+  // We want to center the current user at the bottom (seat-0)
+  // and distribute others around the table.
+  
   if (!gameState.players || gameState.players.length === 0) return;
 
+  // Find my index - 如果是观战者，显示所有玩家但自己在最下方不会显示
   let myIndex = gameState.players.findIndex(p => p.id === user.id);
   const isSpectator = gameState.isSpectator || myIndex === -1;
   
+  // 如果是观战者，不重新排序，按原始顺序显示，但把自己当第0位
   let orderedPlayers;
   if (isSpectator) {
     orderedPlayers = gameState.players;
-    myIndex = -1;
+    myIndex = -1; // 观战者不在玩家列表中
   } else {
+    // Reorder players so I am first
     orderedPlayers = [
       gameState.players[myIndex],
       ...gameState.players.slice(myIndex + 1),
@@ -708,16 +714,22 @@ function renderPlayers() {
     ];
   }
 
+  // Clear all seats (0-7 for 8 players)
   for(let i=0; i<=7; i++) {
-    const seatEl = $(`#seat-${i}`);
-    if (seatEl) seatEl.innerHTML = '';
+    const seat = $(`#seat-${i}`);
+    if (seat) seat.innerHTML = '';
   }
 
   orderedPlayers.forEach((player, i) => {
+    // Support up to 8 players (seat-0 to seat-7)
+    // seat-0: bottom (current user if playing)
+    // seat-1,2,3: top left, top, top right
+    // seat-4,5,6,7: additional seats
     if (i > 7) return;
     const seatEl = $(`#seat-${i}`);
     if (!seatEl) return;
 
+    // Check if it's their turn (original index matters here)
     const originalIndex = gameState.players.findIndex(p => p.id === player.id);
     const isCurrent = (originalIndex === gameState.currentPlayerIndex) &&
       gameState.phase !== 'SHOWDOWN' && gameState.phase !== 'FINISHED';
@@ -734,94 +746,61 @@ function renderPlayers() {
       wonAmount = gameState.lastAction.amount;
     }
 
-    const isMe = i === 0 && !isSpectator;
-    let html = `<div class="flex flex-col items-center relative ${isCurrent ? 'ring-4 ring-secondary rounded-xl scale-110 transition-transform' : ''} ${player.folded || player.disconnected ? 'opacity-50 grayscale' : ''}">`;
+    let panelClass = 'player-panel';
+    if (isCurrent) panelClass += ' is-current';
+    if (player.folded || player.disconnected) panelClass += ' is-folded';
+    if (isWinner) panelClass += ' is-winner';
 
-    if (isMe) {
-        html += `<div class="flex gap-2 mb-2">`;
-        if (player.holeCards && player.holeCards.length > 0) {
-            player.holeCards.forEach((card, idx) => {
-                const isRed = card.suit === '♥' || card.suit === '♦';
-                const rotateCls = idx === 0 ? '-rotate-6' : 'rotate-6';
-                if(card.hidden) {
-                   html += `<div class="w-12 h-16 sm:w-20 sm:h-28 rounded-lg shadow-2xl flex flex-col items-center justify-center p-2 sm:p-3 border border-outline-variant bg-surface-container-highest transform ${rotateCls}">`;
-                   html += `<div class="w-full h-full bg-gradient-to-br from-primary/10 to-transparent flex items-center justify-center"><span class="material-symbols-outlined text-primary/40 text-2xl sm:text-4xl">style</span></div>`;
-                   html += `</div>`;
-                } else {
-                   html += `<div class="w-12 h-16 sm:w-20 sm:h-28 bg-white rounded-lg shadow-2xl flex flex-col justify-between p-2 sm:p-3 border-2 border-primary ring-4 ring-primary/20 transform ${rotateCls}">`;
-                   const txtColor = isRed ? 'text-red-600' : 'text-black';
-                   const icon = card.suit === '♥' ? 'favorite' : card.suit === '♦' ? 'diamond' : card.suit === '♠' ? 'spades' : 'club';
-                   html += `<div class="${txtColor} font-headline font-bold text-base sm:text-xl leading-none">${card.rank}<br/><span class="text-xs sm:text-sm">${card.suit}</span></div>`;
-                   html += `<div class="self-center material-symbols-outlined ${txtColor} text-2xl sm:text-4xl" style="font-variation-settings: 'FILL' 1;">${icon}</div>`;
-                   html += `<div class="${txtColor} font-headline font-bold text-base sm:text-xl leading-none rotate-180">${card.rank}<br/><span class="text-xs sm:text-sm">${card.suit}</span></div>`;
-                   html += `</div>`;
-                }
-            });
-        }
-        html += `</div>`;
-        html += `<div class="glass-panel px-4 sm:px-6 py-2 sm:py-3 rounded-xl border-2 border-primary ring-4 sm:ring-8 ring-primary/10 text-center relative z-20">`;
-        html += `<p class="text-[10px] sm:text-xs font-bold uppercase text-primary tracking-widest mb-1">${player.name} (You)</p>`;
-        html += `<p class="text-secondary text-lg sm:text-xl font-headline font-black leading-none">${player.chips.toLocaleString()}</p>`;
-        html += `</div>`;
-    } else {
-        html += `<div class="relative w-12 h-12 sm:w-16 sm:h-16 rounded-full border-2 border-outline-variant bg-surface-container-low overflow-hidden shadow-xl">`;
-        html += `<img src="${player.picture || `https://api.dicebear.com/7.x/avataaars/svg?seed=${player.name}`}" class="w-full h-full object-cover">`;
-        html += `</div>`;
-        html += `<div class="glass-panel mt-1 sm:mt-2 px-2 sm:px-3 py-1 rounded-lg text-center relative z-30">`;
-        html += `<p class="text-[8px] sm:text-[10px] font-bold uppercase truncate w-16 sm:w-24 text-on-surface">${player.name}</p>`;
-        html += `<p class="text-secondary text-[10px] sm:text-xs font-headline font-black">${player.chips.toLocaleString()}</p>`;
-        html += `</div>`;
-        html += `<div class="flex gap-1 -mt-3 sm:-mt-4 z-20">`;
-        if (player.holeCards && player.holeCards.length > 0) {
-            player.holeCards.forEach(card => {
-                if (card.hidden) {
-                    html += `<div class="w-5 h-7 sm:w-6 sm:h-9 bg-primary-container rounded shadow-md border border-primary/20"></div>`;
-                } else {
-                    const isRed = card.suit === '♥' || card.suit === '♦';
-                    const txtColor = isRed ? 'text-red-600' : 'text-black';
-                    html += `<div class="w-5 h-7 sm:w-6 sm:h-9 bg-white rounded shadow-md border border-outline-variant flex flex-col items-center justify-center -space-y-1 p-0.5">`;
-                    html += `<span class="${txtColor} font-bold text-[8px] sm:text-[10px] leading-none">${card.rank}</span>`;
-                    html += `<span class="${txtColor} text-[8px] sm:text-[10px] leading-none">${card.suit}</span>`;
-                    html += `</div>`;
-                }
-            });
-        }
-        html += `</div>`;
+    let html = `<div class="${panelClass}">`;
+    html += `<div class="player-name">`;
+    if (player.picture) {
+      html += `<img src="${player.picture}" class="avatar-sm" style="width:18px;height:18px;vertical-align:middle;margin-right:4px;">`;
     }
-
-    if (player.isDealer) {
-        html += `<div class="absolute -right-2 top-0 bg-secondary rounded-full w-5 h-5 sm:w-6 sm:h-6 flex items-center justify-center border-2 border-surface shadow-lg z-50">`;
-        html += `<span class="text-[8px] sm:text-[10px] font-black text-on-secondary">D</span></div>`;
-    }
-    
-    let statusText = '';
-    let statusColor = 'text-warning';
-    if (player.disconnected) { statusText = 'Disconnected'; statusColor = 'text-on-surface-variant'; }
-    else if (player.folded) { statusText = 'Folded'; statusColor = 'text-on-surface-variant'; }
-    else if (player.allIn) { statusText = 'ALL-IN'; statusColor = 'text-secondary'; }
-    
-    if (statusText) {
-       html += `<div class="absolute inset-0 flex items-center justify-center z-50 pointer-events-none mt-10">`;
-       html += `<span class="bg-surface-container-highest px-2 py-0.5 rounded text-[8px] font-bold ${statusColor} uppercase border border-outline-variant/50">${statusText}</span>`;
-       html += `</div>`;
-    }
+    html += player.name;
+    if (player.isDealer) html += ` <span class="dealer-chip">D</span>`;
+    html += `</div>`;
+    html += `<div class="player-chips">💰 ${player.chips}</div>`;
 
     if (player.bet > 0) {
-       html += `<div class="absolute ${isMe ? '-top-6' : '-bottom-6'} w-max bg-surface-container-highest px-2 py-0.5 rounded-full border border-secondary/20 flex items-center gap-1 shadow-lg z-50">`;
-       html += `<span class="material-symbols-outlined text-secondary text-[10px]" style="font-variation-settings: 'FILL' 1;">monetization_on</span>`;
-       html += `<span class="text-[10px] font-bold text-secondary">${player.bet.toLocaleString()}</span>`;
-       html += `</div>`;
+      html += `<div class="player-bet">下注: ${player.bet}</div>`;
     }
-    
+
+    if (player.disconnected) {
+       html += `<div class="player-status">已掉线</div>`;
+    } else if (player.folded) {
+      html += `<div class="player-status">已弃牌</div>`;
+    } else if (player.allIn) {
+      html += `<div class="player-status" style="color: var(--accent-gold)">ALL IN</div>`;
+    }
+
     if (isWinner) {
-       html += `<div class="absolute top-0 right-0 w-max bg-primary-container px-2 py-1 rounded text-[10px] font-bold text-on-primary-container z-50 animate-bounce">+${wonAmount.toLocaleString()}</div>`;
+      html += `<div class="player-hand-name">🏆 +${wonAmount}</div>`;
     }
-    
+
     if (player.bestHand && isShowdown && !player.folded) {
-       html += `<div class="absolute bottom-[-15px] sm:bottom-[-20px] text-[8px] sm:text-[10px] bg-secondary/80 text-background px-1 rounded font-bold">${player.bestHand}</div>`;
+      html += `<div class="player-hand-name">${player.bestHand}</div>`;
     }
 
     html += `</div>`;
+
+    // Render cards
+    html += `<div class="player-cards">`;
+    if (player.holeCards && player.holeCards.length > 0) {
+      for (const card of player.holeCards) {
+        if (card.hidden) {
+          html += `<div class="card card-back ${i !== 0 ? 'card-sm' : ''}"></div>`;
+        } else {
+          const isRed = card.suit === '♥' || card.suit === '♦';
+          const sizeClass = i !== 0 ? 'card-sm' : '';
+          html += `<div class="card card-front ${isRed ? 'red' : 'black'} ${sizeClass}">`;
+          html += `<span class="card-rank">${card.rank}</span>`;
+          html += `<span class="card-suit">${card.suit}</span>`;
+          html += `</div>`;
+        }
+      }
+    }
+    html += `</div>`;
+
     seatEl.innerHTML = html;
   });
 }
@@ -831,12 +810,9 @@ function renderCommunityCards() {
   if (gameState.communityCards && gameState.communityCards.length > 0) {
     for (const card of gameState.communityCards) {
       const isRed = card.suit === '♥' || card.suit === '♦';
-      const txtColor = isRed ? 'text-red-600' : 'text-black';
-      const icon = card.suit === '♥' ? 'favorite' : card.suit === '♦' ? 'diamond' : card.suit === '♠' ? 'spades' : 'club';
-      html += `<div class="w-10 h-16 sm:w-16 sm:h-24 bg-white rounded-lg shadow-lg flex flex-col justify-between p-1 sm:p-2 border border-outline-variant/20">`;
-      html += `<div class="${txtColor} font-headline font-bold text-sm sm:text-lg leading-none">${card.rank}<br/><span class="text-[8px] sm:text-xs">${card.suit}</span></div>`;
-      html += `<div class="self-center material-symbols-outlined ${txtColor} text-xl sm:text-3xl" style="font-variation-settings: 'FILL' 1;">${icon}</div>`;
-      html += `<div class="${txtColor} font-headline font-bold text-sm sm:text-lg leading-none rotate-180">${card.rank}<br/><span class="text-[8px] sm:text-xs">${card.suit}</span></div>`;
+      html += `<div class="card card-front ${isRed ? 'red' : 'black'}">`;
+      html += `<span class="card-rank">${card.rank}</span>`;
+      html += `<span class="card-suit">${card.suit}</span>`;
       html += `</div>`;
     }
   }
@@ -844,7 +820,7 @@ function renderCommunityCards() {
 }
 
 function renderPot() {
-  els.potAmount.textContent = (gameState.pot || 0).toLocaleString();
+  els.potAmount.textContent = gameState.pot;
 }
 
 function renderActions() {
@@ -852,62 +828,63 @@ function renderActions() {
   let html = '';
 
   if (actions.includes('nextHand')) {
-    html += `<button class="flex-1 max-w-[200px] py-4 rounded-lg bg-gradient-to-br from-primary to-primary-container text-on-primary font-headline font-black uppercase tracking-widest shadow-xl active:scale-95 transition-transform" onclick="window._nextHand()">准备 ${gameState.readyRemainingTime > 0 ? `(${gameState.readyRemainingTime}s)` : ''}</button>`;
-    html += `<button class="flex-1 max-w-[120px] py-4 rounded-lg bg-surface-container-highest border border-outline-variant text-on-surface font-headline font-bold uppercase tracking-wider hover:bg-outline-variant transition-colors" onclick="window._backToLobby()">离开</button>`;
+    html += `<button class="btn btn-primary btn-lg" onclick="window._nextHand()">准备下一手 ➜</button>`;
+    html += `<button class="btn btn-ghost btn-sm" style="margin-left: 8px;" onclick="window._backToLobby()">返回大厅</button>`;
+    // 显示准备倒计时
+    if (gameState.readyRemainingTime && gameState.readyRemainingTime > 0) {
+      html += `<span class="ready-countdown" style="margin-left: 12px; color: ${gameState.readyRemainingTime <= 10 ? 'var(--danger)' : 'var(--text-muted)'}; font-size: 0.85rem;">⏱ ${gameState.readyRemainingTime}s</span>`;
+    }
     els.actionButtons.innerHTML = html;
     els.raiseControls.classList.add('hidden');
-    els.actionButtons.classList.remove('hidden');
     raiseMode = false;
     return;
   }
 
   if (actions.length === 0) {
     if (gameState.isSpectator) {
-      html += `<div class="text-on-surface-variant text-xs font-bold uppercase tracking-widest px-4">观战中</div>`;
-      html += `<button class="max-w-[120px] px-6 py-2 rounded-lg bg-surface-container-highest text-on-surface hover:bg-outline-variant transition-colors uppercase font-bold text-xs" onclick="window._backToLobby()">返回大厅</button>`;
+      html += `<span style="color: var(--text-muted); font-size: 0.85rem;">观战中</span>`;
+      html += `<button class="btn btn-ghost btn-sm" style="margin-left: 8px;" onclick="window._backToLobby()">返回大厅</button>`;
     } else {
-      html += `<div class="text-on-surface-variant text-sm font-bold uppercase tracking-widest animate-pulse">Wait holding...</div>`;
+      html += `<span style="color: var(--text-muted); font-size: 0.85rem;">等待对手行动...</span>`;
     }
     els.actionButtons.innerHTML = html;
     els.raiseControls.classList.add('hidden');
-    els.actionButtons.classList.remove('hidden');
     return;
   }
 
   if (actions.includes('fold')) {
-    html += `<button class="flex-1 max-w-[120px] py-3 sm:py-4 rounded-lg bg-surface-container-highest border border-outline-variant text-on-surface font-headline font-bold uppercase tracking-wider hover:bg-outline-variant transition-colors active:scale-95 text-xs sm:text-base" onclick="window._action('fold')">Fold</button>`;
+    html += `<button class="btn btn-danger" onclick="window._action('fold')">弃牌</button>`;
   }
   if (actions.includes('check')) {
-    html += `<button class="flex-1 max-w-[120px] py-3 sm:py-4 rounded-lg bg-surface-container-highest border border-outline-variant text-on-surface font-headline font-bold uppercase tracking-wider hover:bg-outline-variant transition-colors active:scale-95 text-xs sm:text-base" onclick="window._action('check')">Check</button>`;
+    html += `<button class="btn btn-ghost" onclick="window._action('check')">过牌</button>`;
   }
   if (actions.includes('call')) {
     const myIndex = gameState.players.findIndex(p => p.id === user.id);
     const myBet = myIndex >= 0 ? gameState.players[myIndex].bet : 0;
     const callAmount = gameState.currentBet - myBet;
-    html += `<button class="flex-1 max-w-[200px] py-3 sm:py-4 rounded-lg bg-gradient-to-br from-primary to-primary-container text-on-primary font-headline font-extrabold uppercase tracking-widest shadow-lg shadow-primary/20 active:scale-95 transition-transform text-xs sm:text-base" onclick="window._action('call')">Call ${callAmount}</button>`;
+    html += `<button class="btn btn-success" onclick="window._action('call')">跟注 ${callAmount}</button>`;
   }
   if (actions.includes('raise')) {
-    html += `<button class="flex-1 max-w-[140px] py-3 sm:py-4 rounded-lg bg-gradient-to-br from-secondary to-secondary-container text-on-secondary-container font-headline font-black uppercase tracking-widest shadow-xl shadow-secondary/10 active:scale-95 transition-transform text-xs sm:text-base" onclick="window._toggleRaise()">Raise</button>`;
+    html += `<button class="btn btn-accent" onclick="window._toggleRaise()">加注</button>`;
   }
   if (actions.includes('allin')) {
-    html += `<button class="flex-1 max-w-[140px] py-3 sm:py-4 rounded-lg bg-gradient-to-br from-error to-error-container text-on-error font-headline font-black uppercase tracking-widest shadow-xl shadow-error/10 active:scale-95 transition-transform text-xs sm:text-base" onclick="window._action('allin')">All-In</button>`;
+    html += `<button class="btn btn-primary" onclick="window._action('allin')">全下</button>`;
   }
 
   els.actionButtons.innerHTML = html;
 
+  // Update raise controls
   if (raiseMode && actions.includes('raise')) {
     const player = gameState.players.find(p => p.id === user.id);
-    const minRaise = gameState.currentBet + 20;
+    const minRaise = gameState.currentBet + 20; // assumed min raise
     const maxRaise = player.chips + player.bet;
     els.raiseSlider.min = minRaise;
     els.raiseSlider.max = maxRaise;
     els.raiseSlider.value = minRaise;
     els.raiseValue.textContent = minRaise;
     els.raiseControls.classList.remove('hidden');
-    els.actionButtons.classList.add('hidden');
   } else {
     els.raiseControls.classList.add('hidden');
-    els.actionButtons.classList.remove('hidden');
   }
 }
 
@@ -1986,20 +1963,13 @@ async function loadLeaderboard(type = 'chips') {
 // ── Events ────────────────────────────────────────────────────
 function setupEventListeners() {
   // Login tabs
-  document.querySelectorAll('.login-tabs button[data-tab]').forEach(tab => {
+  document.querySelectorAll('.login-tab').forEach(tab => {
     tab.addEventListener('click', () => {
-      document.querySelectorAll('.login-tabs button[data-tab]').forEach(t => {
-        t.classList.remove('text-primary', 'border-primary');
-        t.classList.add('text-on-surface-variant', 'border-transparent');
-      });
-      ['guest', 'login', 'register'].forEach(id => {
-        const el = document.getElementById(`tab-${id}`);
-        if(el) el.classList.add('hidden');
-      });
-      tab.classList.remove('text-on-surface-variant', 'border-transparent');
-      tab.classList.add('text-primary', 'border-primary');
+      document.querySelectorAll('.login-tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.login-tab-content').forEach(c => c.classList.remove('active'));
+      tab.classList.add('active');
       const tabId = tab.dataset.tab;
-      document.getElementById(`tab-${tabId}`).classList.remove('hidden');
+      document.getElementById(`tab-${tabId}`).classList.add('active');
     });
   });
   

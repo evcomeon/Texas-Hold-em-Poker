@@ -848,33 +848,38 @@ class GameEngine {
     
     this.readyForNext.add(userId);
     const activePlayers = this.players.filter(p => this._isPlayerConnected(p) && p.chips > 0);
-    const count = this.readyForNext.size;
-    const total = activePlayers.length;
     
-    const readyActiveCount = activePlayers.filter(p => this.readyForNext.has(p.id)).length;
+    // 所有需要准备的参与者 = 活跃玩家 + 观战者（观战者下一手会被提升为玩家）
+    const allParticipantIds = [
+      ...activePlayers.map(p => p.id),
+      ...this.spectators
+    ];
+    const total = allParticipantIds.length;
+    const readyCount = allParticipantIds.filter(id => this.readyForNext.has(id)).length;
     
-    this._log(`准备请求: ${userId}, 活跃玩家: ${activePlayers.map(p => p.name).join(',')}, 准备数: ${readyActiveCount}/${total}`);
+    this._log(`准备请求: ${userId}, 活跃玩家: ${activePlayers.map(p => p.name).join(',')}, 观战者: ${this.spectators.length}, 准备数: ${readyCount}/${total}`);
     this._emitEvent('player_ready_next_hand', {
       userId,
-      amount: readyActiveCount,
+      amount: readyCount,
       metadata: {
-        readyCount: readyActiveCount,
-        activePlayerCount: total,
+        readyCount,
+        activePlayerCount: activePlayers.length,
+        spectatorCount: this.spectators.length,
+        totalParticipants: total,
       },
     });
     
-    // 如果活跃玩家不足2人，需要检查观战者是否有足够筹码
-    if (activePlayers.length < 2) {
-      this._log(`活跃玩家不足2人，需要检查观战者`);
-      // 返回特殊标志，表示需要尝试从观战者中匹配
-      return { ready: true, count: readyActiveCount, total, needSpectatorMatch: true };
+    // 如果总参与者不足2人，需要尝试匹配
+    if (total < 2) {
+      this._log(`参与者不足2人，需要检查是否有更多玩家`);
+      return { ready: true, count: readyCount, total, needSpectatorMatch: true };
     }
     
-    if (readyActiveCount >= activePlayers.length) {
+    if (readyCount >= total) {
       this.clearReadyTimer();
-      return { ready: true, count: readyActiveCount, total };
+      return { ready: true, count: readyCount, total };
     }
-    return { ready: false, count: readyActiveCount, total };
+    return { ready: false, count: readyCount, total };
   }
 
   startReadyTimer() {
@@ -901,8 +906,16 @@ class GameEngine {
   }
 
   _handleReadyTimeout() {
+    // 检查未准备的玩家
     const activePlayers = this.players.filter(p => this._isPlayerConnected(p) && p.chips > 0);
     const notReadyPlayers = activePlayers.filter(p => !this.readyForNext.has(p.id));
+    
+    // 检查未准备的观战者（直接移除，不影响游戏）
+    const notReadySpectators = this.spectators.filter(id => !this.readyForNext.has(id));
+    for (const specId of notReadySpectators) {
+      this.removeSpectator(specId);
+      this._log(`观战者 ${specId} 准备超时，已移除`);
+    }
     
     if (notReadyPlayers.length > 0) {
       this._log(`准备超时，以下玩家将被移除: ${notReadyPlayers.map(p => p.name).join(', ')}`);

@@ -1,428 +1,425 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
+import json
+import re
+
+html_template = """<!DOCTYPE html>
+<html class="dark" lang="zh-CN">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="德州扑克 - 多人在线游戏" />
-  <title>🃏 德州扑克 - 多人在线</title>
-  
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css" />
-  
-  <!-- Google Identity Services -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>The Velvet Vault - 德州扑克</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700;900&family=Manrope:wght@200;300;400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+  <script id="tailwind-config">
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {"secondary": "#e9c349", "on-secondary-container": "#342800", "surface-container-highest": "#2c372f", "background": "#0b160f", "on-surface": "#d9e6da", "surface-container-lowest": "#06100a", "on-secondary": "#3c2f00", "surface-tint": "#a1d2ab", "primary-fixed": "#bdefc6", "surface-container-high": "#212d25", "outline-variant": "#414942", "primary-container": "#1a472a", "on-background": "#d9e6da", "surface-container": "#17221b", "outline": "#8b938a", "primary": "#a1d2ab", "surface-variant": "#2c372f", "secondary-container": "#af8d11", "surface": "#0b160f", "on-primary": "#08381d", "on-surface-variant": "#c1c9bf", "surface-bright": "#303c34", "on-primary-container": "#85b590", "surface-container-low": "#131e17", "error": "#ffb4ab", "danger": "#ffb4ab", "success": "#a1d2ab", "warning": "#e9c349"},
+          fontFamily: { "headline": ["Space Grotesk"], "body": ["Manrope"], "label": ["Manrope"] },
+          borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+        },
+      },
+    }
+  </script>
+  <style>
+    .glass-card, .glass-panel { background: rgba(44, 55, 47, 0.6); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+    .bg-pattern { background-image: radial-gradient(#1a472a 0.5px, transparent 0.5px); background-size: 24px 24px; }
+    .hero-gradient { background: radial-gradient(circle at center, #1a472a 0%, #0b160f 100%); }
+    .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; vertical-align: middle; }
+    .poker-table-felt { background: radial-gradient(circle at center, #1a472a 0%, #0b160f 100%); clip-path: ellipse(50% 45% at 50% 50%); }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    /* Overrides for dynamic elements */
+    .hidden { display: none !important; }
+    #chat-messages { height: 200px; overflow-y: auto; }
+  </style>
 </head>
-<body>
-  <div id="app">
-    <!-- Header -->
-    <header class="header">
-      <h1>🃏 德州扑克</h1>
-      <div class="header-info">
-        <span id="global-online-count" class="badge">在线: 0</span>
-        <span id="hand-number" class="hidden">第 0 手</span>
-        <span id="phase-badge" class="badge hidden">等待中</span>
-        <span id="table-info" class="badge hidden">玩家: 0/0</span>
+<body class="bg-surface font-body text-on-surface selection:bg-primary selection:text-on-primary min-h-screen flex flex-col overflow-x-hidden">
+  
+  <div id="app" class="w-full h-full min-h-screen flex flex-col relative text-[10px] sm:text-base">
+
+    <!-- Global App Header / Navbar -->
+    <header id="user-navbar" class="hidden flex justify-between items-center w-full px-6 h-16 sticky top-0 z-50 bg-[#0b160f]">
+      <div class="flex items-center gap-4 sm:gap-8">
+        <span class="text-xl font-black text-[#d9e6da] uppercase tracking-widest font-['Space_Grotesk'] hidden sm:block">The Velvet Vault</span>
+        <span class="text-xl font-black text-[#d9e6da] uppercase tracking-widest font-['Space_Grotesk'] sm:hidden">V-Vault</span>
+        <div class="hidden md:flex gap-6 items-center h-full">
+          <span id="global-online-count" class="text-xs text-on-surface-variant">在线: 0</span>
+          <span id="hand-number" class="hidden text-xs text-on-surface-variant font-bold">第 0 手</span>
+          <span id="phase-badge" class="hidden text-xs text-primary px-2 py-1 rounded border border-primary/30">等待中</span>
+          <span id="table-info" class="hidden text-xs text-on-surface-variant">玩家: 0/0</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 sm:gap-4">
+        <div class="hidden sm:flex items-center gap-3 bg-surface-container-low px-4 py-1.5 rounded-full border border-outline-variant/10">
+          <div class="flex items-center gap-1.5">
+            <span class="material-symbols-outlined text-secondary text-lg" style="font-variation-settings: 'FILL' 1;">monetization_on</span>
+            <span id="nav-chips" class="font-headline font-bold text-sm">0</span>
+          </div>
+        </div>
+        <div class="flex flex-col text-right ml-2 mr-2">
+            <span id="nav-name" class="font-bold text-sm">Player</span>
+            <a href="#" id="btn-logout" class="text-[10px] text-primary hover:text-secondary">退出</a>
+        </div>
+        <div class="h-10 w-10 rounded-full overflow-hidden border-2 border-primary/30 cursor-pointer" id="btn-profile">
+          <img id="nav-avatar" class="w-full h-full object-cover" src="https://api.dicebear.com/7.x/avataaars/svg?seed=Guest" />
+        </div>
       </div>
     </header>
 
-    <!-- Navigation / Top Bar -->
-    <div id="user-navbar" class="user-navbar hidden">
-      <div class="user-profile">
-        <img id="nav-avatar" src="" alt="Avatar" class="avatar-sm" />
-        <span id="nav-name">玩家名</span>
-        <span class="chips-badge">💰 <span id="nav-chips">0</span></span>
+    <!-- 1. LOGIN SCREEN -->
+    <div id="login-screen" class="w-full h-screen relative flex items-center justify-center">
+      <div class="absolute inset-0 z-0 hero-gradient overflow-hidden">
+        <div class="absolute inset-0 bg-pattern opacity-20"></div>
+        <div class="absolute -top-1/4 -right-1/4 w-[600px] h-[600px] bg-primary/5 blur-[120px] rounded-full px-2"></div>
+        <div class="absolute -bottom-1/4 -left-1/4 w-[600px] h-[600px] bg-secondary/5 blur-[120px] rounded-full"></div>
       </div>
-      <button id="btn-logout" class="btn btn-ghost btn-sm">退出</button>
-    </div>
-
-    <!-- Login Screen -->
-    <div id="login-screen" class="screen-container">
-      <div class="glass-card text-center login-card">
-        <div class="start-icon">🃏</div>
-        <h2>德州扑克</h2>
-        <p>多人实时对战</p>
-        
-        <div class="login-tabs">
-          <button class="login-tab active" data-tab="guest">快速体验</button>
-          <button class="login-tab" data-tab="login">登录</button>
-          <button class="login-tab" data-tab="register">注册</button>
+      
+      <main class="relative z-10 w-full max-w-6xl grid grid-cols-1 lg:grid-cols-12 gap-12 items-center p-6 md:p-12">
+        <div class="lg:col-span-6 space-y-8 text-center lg:text-left">
+          <div class="space-y-2">
+            <span class="font-headline text-secondary uppercase tracking-[0.3em] text-sm font-bold">The Velvet Vault</span>
+            <h1 class="font-headline text-5xl md:text-7xl font-black text-on-surface leading-tight tracking-tighter">DEAL INTO<br/>EXCELLENCE.</h1>
+          </div>
+          <p class="text-on-surface-variant text-lg md:text-xl max-w-md mx-auto lg:mx-0 font-light leading-relaxed">高级德州扑克私人俱乐部。专属桌面，沉浸体验。</p>
         </div>
         
-        <!-- Guest Login -->
-        <div id="tab-guest" class="login-tab-content active">
-          <div class="start-input-group">
-            <input type="text" id="guest-name" placeholder="输入昵称" maxlength="10" />
-          </div>
-          <button id="btn-guest-login" class="btn btn-primary btn-lg w-full">游客登录</button>
-        </div>
-        
-        <!-- Login Form -->
-        <div id="tab-login" class="login-tab-content">
-          <div class="start-input-group">
-            <input type="text" id="login-username" placeholder="用户名" maxlength="20" />
-          </div>
-          <div class="start-input-group">
-            <input type="password" id="login-password" placeholder="密码" maxlength="50" />
-          </div>
-          <button id="btn-login" class="btn btn-primary btn-lg w-full">登录</button>
-          <p class="login-error hidden" id="login-error"></p>
-        </div>
-        
-        <!-- Register Form -->
-        <div id="tab-register" class="login-tab-content">
-          <div class="start-input-group">
-            <input type="text" id="register-username" placeholder="用户名 (2-20字符)" maxlength="20" />
-          </div>
-          <div class="start-input-group">
-            <input type="email" id="register-email" placeholder="邮箱" maxlength="100" />
-          </div>
-          <div class="start-input-group">
-            <input type="password" id="register-password" placeholder="密码 (至少6位)" maxlength="50" />
-          </div>
-          <button id="btn-register" class="btn btn-primary btn-lg w-full">注册</button>
-          <p class="login-error hidden" id="register-error"></p>
-        </div>
-        
-        <div class="divider"><span>OR</span></div>
-        
-        <div class="social-login">
-          <div id="google-login-btn" class="google-btn-wrapper"></div>
-          <button id="wallet-login-btn" class="btn btn-metamask btn-lg w-full mt-10">
-            <span class="metamask-icon">🔐</span>
-            <span>Web3 钱包登录</span>
-          </button>
-        </div>
-        
-        <div id="wallet-modal" class="modal hidden">
-          <div class="modal-content glass-card">
-            <div class="modal-header">
-              <h3>选择钱包</h3>
-              <button class="modal-close" id="wallet-modal-close">×</button>
+        <div class="lg:col-span-6 flex justify-center lg:justify-end">
+          <div class="glass-card w-full max-w-md p-8 md:p-10 rounded-xl shadow-[0_20px_40px_rgba(0,0,0,0.4)] border border-outline-variant/10">
+            <div class="mb-8 text-center lg:text-left">
+              <h2 class="font-headline text-2xl font-bold text-on-surface mb-2">Member Access</h2>
+              <p class="text-on-surface-variant text-sm">进入私人俱乐部</p>
             </div>
-            <div class="modal-body">
-              <div id="wallet-list" class="wallet-list"></div>
+            
+            <div class="login-tabs flex border-b border-outline-variant/20 mb-6">
+              <button class="flex-1 py-2 text-primary font-bold border-b-2 border-primary" data-tab="guest">快速体验</button>
+              <button class="flex-1 py-2 text-on-surface-variant font-bold border-b-2 border-transparent hover:text-on-surface" data-tab="login">登录</button>
+              <button class="flex-1 py-2 text-on-surface-variant font-bold border-b-2 border-transparent hover:text-on-surface" data-tab="register">注册</button>
+            </div>
+
+            <form id="tab-guest" class="space-y-6">
+              <div class="space-y-2">
+                <label class="block text-[10px] uppercase tracking-widest font-bold text-on-surface-variant ml-1">昵称 (Nickname)</label>
+                <div class="relative group">
+                  <span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant text-xl">person</span>
+                  <input id="guest-name" class="w-full bg-surface-container-low border-0 rounded-lg py-4 pl-12 pr-4 text-on-surface placeholder:text-on-surface-variant/30 focus:ring-2 focus:ring-primary/50 transition-all font-medium" placeholder="输入昵称" type="text"/>
+                </div>
+              </div>
+              <button id="btn-guest-login" type="button" class="w-full py-4 bg-gradient-to-br from-primary to-primary-container text-on-primary font-headline font-bold uppercase tracking-widest rounded-lg shadow-xl shadow-primary/10 active:scale-95 transition-all">游客登录 Authentication</button>
+            </form>
+
+            <form id="tab-login" class="space-y-6 hidden">
+              <div class="space-y-2">
+                <label class="block text-[10px] uppercase font-bold text-on-surface-variant ml-1">用户名</label>
+                <div class="relative group">
+                  <span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant text-xl">person</span>
+                  <input id="login-username" class="w-full bg-surface-container-low border-0 rounded-lg py-4 pl-12 pr-4 text-on-surface placeholder:text-on-surface-variant/30 focus:ring-2 focus:ring-primary/50" placeholder="Username" type="text"/>
+                </div>
+              </div>
+              <div class="space-y-2">
+                <label class="block text-[10px] uppercase font-bold text-on-surface-variant ml-1">密码</label>
+                <div class="relative group">
+                  <span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant text-xl">lock</span>
+                  <input id="login-password" class="w-full bg-surface-container-low border-0 rounded-lg py-4 pl-12 pr-4 text-on-surface placeholder:text-on-surface-variant/30 focus:ring-2 focus:ring-primary/50" placeholder="••••••••" type="password"/>
+                </div>
+              </div>
+              <p id="login-error" class="hidden text-error text-sm font-bold"></p>
+              <button id="btn-login" type="button" class="w-full py-4 bg-gradient-to-br from-primary to-primary-container text-on-primary font-headline font-bold uppercase tracking-widest rounded-lg shadow-xl active:scale-95">Authenticate</button>
+            </form>
+            
+            <form id="tab-register" class="space-y-6 hidden">
+              <div class="space-y-2">
+                <label class="block text-[10px] uppercase font-bold text-on-surface-variant ml-1">用户名</label>
+                <div class="relative group">
+                  <span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant text-xl">person</span>
+                  <input id="register-username" class="w-full bg-surface-container-low border-0 rounded-lg py-4 pl-12 pr-4 text-on-surface placeholder:text-on-surface-variant/30 focus:ring-2 focus:ring-primary/50" placeholder="Username" type="text"/>
+                </div>
+              </div>
+              <div class="space-y-2">
+                <label class="block text-[10px] uppercase font-bold text-on-surface-variant ml-1">邮箱</label>
+                <div class="relative group">
+                  <span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant text-xl">mail</span>
+                  <input id="register-email" class="w-full bg-surface-container-low border-0 rounded-lg py-4 pl-12 pr-4 text-on-surface placeholder:text-on-surface-variant/30 focus:ring-2 focus:ring-primary/50" placeholder="Email" type="email"/>
+                </div>
+              </div>
+              <div class="space-y-2">
+                <label class="block text-[10px] uppercase font-bold text-on-surface-variant ml-1">密码</label>
+                <div class="relative group">
+                  <span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant text-xl">lock</span>
+                  <input id="register-password" class="w-full bg-surface-container-low border-0 rounded-lg py-4 pl-12 pr-4 text-on-surface placeholder:text-on-surface-variant/30 focus:ring-2 focus:ring-primary/50" placeholder="••••••••" type="password"/>
+                </div>
+              </div>
+              <p id="register-error" class="hidden text-error text-sm font-bold"></p>
+              <button id="btn-register" type="button" class="w-full py-4 bg-gradient-to-br from-primary to-primary-container text-on-primary font-headline font-bold uppercase tracking-widest rounded-lg shadow-xl active:scale-95">Claim Access</button>
+            </form>
+
+            <div class="relative my-8">
+              <div class="absolute inset-0 flex items-center"><div class="w-full border-t border-outline-variant/20"></div></div>
+              <div class="relative flex justify-center text-[10px] uppercase tracking-widest font-black"><span class="bg-surface-container-highest px-4 text-on-surface-variant">Social Credentials</span></div>
+            </div>
+            
+            <div class="space-y-3">
+              <div id="google-login-btn" class="w-full h-12 flex justify-center items-center"></div>
+              <button id="wallet-login-btn" class="w-full flex items-center justify-center p-3 rounded-lg bg-surface-container-low hover:bg-surface-container-high transition-colors border border-outline-variant/10 active:scale-95 font-bold uppercase text-xs tracking-wider gap-2">
+                <span class="material-symbols-outlined text-secondary">wallet</span> Web3 钱包登录
+              </button>
             </div>
           </div>
         </div>
+      </main>
+    </div>
+
+    <!-- 2. LOBBY SCREEN -->
+    <div id="lobby-screen" class="hidden flex-1 overflow-y-auto">
+      <div class="flex">
+        <!-- Main Content -->
+        <main class="flex-1 w-full mx-auto max-w-7xl p-4 md:p-10">
+          
+          <div class="grid grid-cols-1 md:grid-cols-12 gap-6 mb-12">
+            <div class="md:col-span-8 relative rounded-xl overflow-hidden min-h-[300px] flex flex-col justify-end p-8 bg-surface-container group border border-outline-variant/10">
+              <img class="absolute inset-0 w-full h-full object-cover opacity-30 mix-blend-screen group-hover:scale-105 transition-transform duration-700" src="https://images.unsplash.com/photo-1541580621-e00508075302?auto=format&fit=crop&q=80&w=1200"/>
+              <div class="absolute inset-0 bg-gradient-to-t from-background via-surface/80 to-transparent"></div>
+              <div class="relative z-10 space-y-4">
+                <span class="px-3 py-1 bg-secondary/20 text-secondary border border-secondary/30 rounded text-xs font-bold uppercase tracking-widest font-headline w-max">The Velvet Vault</span>
+                <h2 class="text-4xl md:text-5xl font-black font-headline text-on-surface leading-tight tracking-tight">专属<br/>高额桌体验</h2>
+                <div class="flex flex-wrap items-center gap-6 mt-4">
+                  
+                  <div id="queue-status" class="hidden flex items-center gap-4 bg-surface-container-highest px-6 py-3 rounded-lg border border-primary/40 text-primary">
+                    <span class="material-symbols-outlined animate-spin font-bold">sync</span>
+                    <span class="font-headline font-bold uppercase tracking-widest text-sm">正在匹配... (<span id="queue-count">1</span>/2)</span>
+                    <button id="btn-cancel-match" class="text-xs text-on-surface-variant hover:text-error uppercase font-bold ml-4">取消</button>
+                  </div>
+                  
+                  <button id="btn-find-match" class="bg-gradient-to-br from-secondary to-secondary-container text-on-secondary-container px-8 py-3 rounded-lg font-headline font-black uppercase tracking-widest active:scale-95 transition-transform shadow-xl">
+                    开始匹配 Quick Start
+                  </button>
+
+                  <div class="flex items-center gap-2">
+                    <span class="material-symbols-outlined text-primary">groups</span>
+                    <span class="font-label text-sm text-on-surface-variant">当前大厅在线: <span id="lobby-online-count">0</span></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <div class="md:col-span-4 flex flex-col gap-6">
+              <div class="flex-1 glass-panel rounded-xl p-6 border border-outline-variant/10 flex flex-col justify-between">
+                <div>
+                  <h3 class="font-headline font-bold text-lg mb-2 text-primary">当前筹码状态</h3>
+                  <p class="text-on-surface-variant text-sm font-label">我的筹码余额</p>
+                </div>
+                <div class="mt-4 p-4 bg-surface-container-lowest rounded-lg border border-primary/10 flex items-center justify-between shadow-inner">
+                  <div class="flex flex-col">
+                    <span class="text-secondary font-headline font-bold text-2xl" id="lobby-my-chips">10,000</span>
+                  </div>
+                  <span class="material-symbols-outlined text-secondary text-4xl">monetization_on</span>
+                </div>
+              </div>
+              <button class="w-full glass-panel rounded-xl py-4 border border-secondary/20 flex justify-center items-center gap-3 hover:bg-surface-container-highest transition-colors active:scale-95" id="btn-leaderboard">
+                <span class="material-symbols-outlined text-secondary">emoji_events</span>
+                <span class="font-headline font-bold text-sm tracking-tight text-secondary uppercase">查看大厅排行榜</span>
+              </button>
+            </div>
+          </div>
+          
+        </main>
       </div>
     </div>
 
-    <!-- Lobby Screen -->
-    <div id="lobby-screen" class="screen-container hidden">
-      <div class="glass-card lobby-card">
-        <h2>游戏大厅</h2>
-        
-        <div class="lobby-stats">
-          <div class="stat-box">
-            <span class="stat-label">当前在线玩家</span>
-            <span id="lobby-online-count" class="stat-value text-accent">--</span>
+    <!-- 3. GAME AREA -->
+    <div id="game-area" class="hidden flex-1 relative bg-background flex flex-col items-center justify-center p-4">
+      <!-- Spectator Overlay -->
+      <div id="spectator-banner" class="hidden absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-secondary/20 border border-secondary text-secondary px-6 py-2 rounded-full font-bold uppercase tracking-widest text-xs flex gap-4 items-center shadow-lg">
+        <span class="material-symbols-outlined text-sm">visibility</span>
+        您正在观战
+        <span id="spectator-count" class="text-on-surface-variant">0</span>
+      </div>
+      
+      <div class="relative w-full max-w-6xl aspect-[4/3] sm:aspect-[16/9] flex items-center justify-center -mt-10">
+        <!-- Table Wood Frame -->
+        <div class="absolute inset-0 bg-[#342800] rounded-[6rem] sm:rounded-[10rem] border-[8px] sm:border-[12px] border-[#241a00] shadow-[0_40px_80px_rgba(0,0,0,0.8)] opacity-90 blur-[1px]"></div>
+        <!-- Table Felt -->
+        <div class="poker-table-felt absolute inset-3 sm:inset-6 bg-surface-container rounded-[5rem] sm:rounded-[9rem] shadow-inner flex flex-col items-center justify-center border-4 border-primary-container/30">
+          
+          <!-- Timer Display Background (Optional overlay) -->
+          <div id="timer-display" class="hidden absolute inset-0 z-0 pointer-events-none rounded-[5rem] sm:rounded-[9rem] ring-[10px] ring-primary/20 transition-all duration-300">
+             <div class="absolute -top-10 left-1/2 -translate-x-1/2 bg-surface-container-highest px-3 py-1 rounded-full border border-primary/20 text-xs text-primary font-bold shadow-lg" id="timer-text">30s</div>
+             <div class="absolute top-0 left-1/2 -translate-x-1/2 w-1/2 h-1 bg-surface-container-lowest rounded-b overflow-hidden">
+               <div id="timer-progress" class="h-full bg-primary transition-all duration-1000 w-full"></div>
+             </div>
           </div>
-          <div class="stat-box clickable" id="btn-profile">
-            <span class="stat-label">我的筹码</span>
-            <span id="lobby-my-chips" class="stat-value text-gold">10,000</span>
+          
+          <div class="absolute top-[20%] flex flex-col items-center z-10 w-full px-8 opacity-80 pointer-events-none">
+            <span class="text-primary/10 font-headline font-black text-4xl sm:text-6xl uppercase tracking-[0.5em] text-center w-full">Velvet<br/>Vault</span>
           </div>
-          <div class="stat-box clickable" id="btn-leaderboard">
-            <span class="stat-label">🏆 排行榜</span>
-            <span class="stat-value text-accent">查看</span>
+
+          <div class="absolute top-[35%] flex flex-col items-center z-20">
+            <span class="text-[10px] uppercase tracking-widest text-on-surface-variant font-bold mb-1">Total Pot</span>
+            <div class="bg-surface-container-highest/80 px-4 py-1.5 rounded-full border border-secondary/30 flex items-center gap-2 shadow-lg backdrop-blur-md">
+              <span class="material-symbols-outlined text-secondary text-sm" style="font-variation-settings: 'FILL' 1;">monetization_on</span>
+              <span id="pot-amount" class="font-headline font-bold text-secondary text-lg sm:text-2xl">0</span>
+            </div>
           </div>
+
+          <!-- Community Cards (Flop, Turn, River) -->
+          <div id="community-cards" class="flex gap-2 sm:gap-4 z-20 mt-10">
+            <!-- Dynamically populated by main.js with Tailwind classes -->
+          </div>
+
         </div>
 
-        <div class="stake-level-selector">
-          <h4>选择盲注级别</h4>
-          <div class="stake-options">
-            <button class="stake-option" data-level="low">
-              <span class="stake-name">低注桌</span>
-              <span class="stake-blinds">5/10</span>
-            </button>
-            <button class="stake-option active" data-level="medium">
-              <span class="stake-name">中注桌</span>
-              <span class="stake-blinds">10/20</span>
-            </button>
-            <button class="stake-option" data-level="high">
-              <span class="stake-name">高注桌</span>
-              <span class="stake-blinds">25/50</span>
-            </button>
-          </div>
+        <!-- Player Seats Container -->
+        <!-- Placed absolute, relative to the 16:9 box -->
+        <!-- main.js uses left-8 top-1/2, etc. -->
+        <div id="seat-1" class="absolute top-[10%] left-[15%] sm:left-[20%] -translate-x-1/2 -translate-y-1/2 z-30"></div>
+        <div id="seat-2" class="absolute top-0 left-[50%] -translate-x-1/2 -translate-y-[60%] sm:-translate-y-4 z-30"></div>
+        <div id="seat-3" class="absolute top-[10%] right-[15%] sm:right-[20%] translate-x-1/2 -translate-y-1/2 z-30"></div>
+        
+        <div id="seat-4" class="absolute top-[50%] right-[-5%] sm:right-0 translate-x-1/2 -translate-y-1/2 z-30"></div>
+        
+        <!-- Additional seats for up to 8 max -->
+        <div id="seat-7" class="absolute top-[50%] left-[-5%] sm:left-0 -translate-x-1/2 -translate-y-1/2 z-30"></div>
+        
+        <div id="seat-5" class="absolute bottom-[10%] left-[15%] sm:left-[20%] -translate-x-1/2 translate-y-1/2 z-30"></div>
+        <div id="seat-6" class="absolute bottom-[10%] right-[15%] sm:right-[20%] translate-x-1/2 translate-y-1/2 z-30"></div>
+
+        <!-- Bottom Center (YOU/seat-0) -->
+        <div id="seat-0" class="absolute bottom-[-10%] sm:bottom-[-20%] left-[50%] -translate-x-1/2 z-40"></div>
+        
+      </div>
+      
+      <!-- Notification Center -->
+      <div id="notification" class="hidden absolute top-1/4 left-1/2 -translate-x-1/2 bg-primary-container text-on-primary px-8 py-4 rounded-xl shadow-2xl z-50 font-headline font-bold text-lg uppercase tracking-widest border border-primary/50 animate-bounce"></div>
+
+      <!-- Action Bar -->
+      <div class="absolute bottom-[40px] sm:bottom-[10px] w-11/12 max-w-4xl min-h-[80px] glass-panel rounded-2xl p-4 sm:p-6 flex flex-col sm:flex-row items-center justify-between gap-4 border border-outline-variant/20 shadow-[-10px_-10px_30px_rgba(0,0,0,0.6)] z-50 overflow-visible">
+        <div id="action-buttons" class="flex flex-wrap flex-1 gap-2 w-full justify-center">
+            <!-- Dynamic Actions -->
         </div>
         
-        <div class="queue-status hidden" id="queue-status">
-          <div class="spinner"></div>
-          <p>正在匹配对手... (<span id="queue-count">1</span>/2)</p>
-          <button id="btn-cancel-match" class="btn btn-danger mt-10">取消匹配</button>
+        <div id="raise-controls" class="hidden flex-1 flex flex-col gap-2 w-full max-w-sm mt-4 sm:mt-0">
+          <div class="flex justify-between items-center px-1">
+            <span class="text-[10px] sm:text-xs font-bold uppercase tracking-widest text-on-surface-variant">Bet Amount</span>
+            <span id="raise-value" class="text-secondary font-headline font-bold text-lg sm:text-xl">0</span>
+          </div>
+          <div class="relative flex items-center mb-2 px-2">
+            <input type="range" id="raise-slider" class="w-full accent-secondary h-2 bg-surface-container-lowest rounded-lg overflow-hidden appearance-none cursor-pointer" />
+          </div>
+          <button id="btn-confirm-raise" class="w-full py-2 sm:py-3 bg-gradient-to-br from-secondary to-secondary-container text-on-secondary-container font-headline font-black uppercase tracking-widest rounded shadow-xl active:scale-95 transition-transform">Confirm Call/Raise</button>
         </div>
-
-        <button id="btn-find-match" class="btn btn-primary btn-lg pulse-btn">开始匹配</button>
       </div>
     </div>
-
+    
+    <!-- Utilities (Modals, Overlays, Logs) -->
     <!-- Profile Panel -->
-    <div id="profile-panel" class="profile-panel hidden">
-      <div class="profile-content">
-        <div class="profile-header">
-          <img id="profile-avatar" src="" alt="Avatar" class="profile-avatar" />
-          <div class="profile-info">
-            <h3 id="profile-username">用户名</h3>
-            <p id="profile-email" class="text-muted"></p>
-          </div>
-          <button class="btn-close" id="profile-close">✕</button>
+    <div id="profile-panel" class="hidden fixed inset-y-0 right-0 w-80 bg-surface-container-high/95 backdrop-blur-xl border-l border-outline-variant/20 z-[100] p-6 flex flex-col shadow-2xl translate-x-0 transition-transform">
+      <div class="flex justify-between items-center mb-8 border-b border-outline-variant/10 pb-4">
+        <h3 class="font-headline font-bold text-xl text-primary">Member Vault</h3>
+        <button id="profile-close" class="text-on-surface-variant hover:text-error text-2xl font-black">&times;</button>
+      </div>
+      <div class="flex items-center gap-4 mb-8">
+        <img id="profile-avatar" src="" class="w-16 h-16 rounded-full border-2 border-primary/50 shadow-lg object-cover">
+        <div>
+          <h4 id="profile-username" class="font-bold text-lg">---</h4>
+          <span id="profile-level" class="text-xs text-secondary bg-secondary/10 px-2 py-0.5 rounded uppercase tracking-wider font-bold">VIP</span>
         </div>
-        <div class="profile-stats">
-          <div class="profile-stat">
-            <span class="profile-stat-value text-gold" id="profile-chips">10,000</span>
-            <span class="profile-stat-label">筹码</span>
+      </div>
+      <div class="space-y-4 mb-8">
+        <div class="bg-surface-container-low p-4 rounded-lg flex justify-between items-center border border-outline-variant/10">
+          <span class="text-xs font-bold uppercase text-on-surface-variant">Chips Balance</span>
+          <span id="profile-chips" class="text-secondary font-headline font-black text-xl">0</span>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div class="bg-surface-container-low p-4 rounded-lg flex flex-col items-center">
+            <span class="text-[10px] uppercase text-on-surface-variant">Games</span>
+            <span id="profile-games" class="font-bold text-lg mt-1">0</span>
           </div>
-          <div class="profile-stat">
-            <span class="profile-stat-value" id="profile-level">1</span>
-            <span class="profile-stat-label">等级</span>
-          </div>
-          <div class="profile-stat">
-            <span class="profile-stat-value" id="profile-games">0</span>
-            <span class="profile-stat-label">场次</span>
-          </div>
-          <div class="profile-stat">
-            <span class="profile-stat-value text-accent" id="profile-wins">0</span>
-            <span class="profile-stat-label">胜场</span>
-          </div>
-          <div class="profile-stat">
-            <span class="profile-stat-value" id="profile-winrate">0%</span>
-            <span class="profile-stat-label">胜率</span>
+          <div class="bg-surface-container-low p-4 rounded-lg flex flex-col items-center">
+            <span class="text-[10px] uppercase text-on-surface-variant">Win %</span>
+            <span id="profile-winrate" class="font-bold text-lg mt-1 text-primary">0%</span>
           </div>
         </div>
-        <div class="profile-wallet" id="profile-wallet-section">
-          <p class="text-muted text-sm">钱包地址: <span id="profile-wallet-address">未绑定</span></p>
-        </div>
-        <div class="profile-token-section">
-          <div class="profile-token-header">
-            <span class="text-muted text-sm">API Token (JWT)</span>
-            <button class="btn btn-sm btn-ghost" id="btn-copy-token">📋 复制</button>
-          </div>
-          <div class="profile-token-value" id="profile-token-display">-</div>
-        </div>
-        <div class="profile-actions">
-          <button id="btn-recharge" class="btn btn-accent w-full mb-10">💰 充值筹码</button>
-          <button id="btn-logout-profile" class="btn btn-danger w-full">退出登录</button>
-        </div>
+      </div>
+      <div class="mt-auto space-y-3">
+        <button id="btn-recharge" class="w-full py-3 bg-secondary text-on-secondary-container font-bold uppercase tracking-widest rounded-lg shadow-lg">Load Funds</button>
+        <button id="btn-logout" class="w-full py-3 bg-surface-container-lowest text-error font-bold uppercase tracking-widest rounded-lg border border-error/20 hover:bg-error/10">Logout</button>
+      </div>
+    </div>
+
+    <!-- Chat Panel -->
+    <div id="chat-panel" class="hidden fixed inset-y-0 right-0 w-80 bg-surface-container/95 backdrop-blur-xl border-l border-outline-variant/20 z-[90] p-4 flex flex-col shadow-2xl">
+      <div class="flex justify-between items-center mb-4 border-b border-outline-variant/10 pb-2">
+        <h3 class="font-headline font-bold text-lg text-primary">Live Chat</h3>
+        <button id="chat-close" class="text-on-surface-variant hover:text-error text-xl font-black">&times;</button>
+      </div>
+      <div id="chat-messages" class="flex-1 overflow-y-auto space-y-2 mb-4 text-xs"></div>
+      <div class="flex gap-2">
+        <input id="chat-input" class="flex-1 bg-surface-container-low border border-outline-variant/20 rounded px-3 py-2 text-xs text-on-surface focus:outline-none focus:border-primary" placeholder="Type a message..." />
+        <button id="btn-send-chat" class="bg-primary text-on-primary px-3 py-2 rounded font-bold uppercase text-[10px]">Send</button>
       </div>
     </div>
 
     <!-- Leaderboard Panel -->
-    <div id="leaderboard-panel" class="leaderboard-panel hidden">
-      <div class="leaderboard-content">
-        <div class="leaderboard-header">
-          <h3>🏆 排行榜</h3>
-          <button class="btn-close" id="leaderboard-close">✕</button>
+    <div id="leaderboard-panel" class="hidden fixed inset-0 z-[110] bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div class="w-full max-w-2xl bg-surface-container-high rounded-2xl border border-outline-variant/20 shadow-2xl flex flex-col max-h-[80vh]">
+        <div class="flex justify-between items-center p-6 border-b border-outline-variant/10">
+          <h3 class="font-headline font-bold text-2xl text-secondary">Hall of Fame</h3>
+          <button id="leaderboard-close" class="text-on-surface-variant hover:text-error text-2xl font-black">&times;</button>
         </div>
-        
-        <div class="leaderboard-tabs">
-          <button class="leaderboard-tab active" data-type="chips">筹码榜</button>
-          <button class="leaderboard-tab" data-type="winrate">胜率榜</button>
+        <div class="flex border-b border-outline-variant/10">
+          <button class="flex-1 py-3 text-secondary border-b-2 border-secondary font-bold uppercase text-xs tracking-widest leaderboard-tab active" data-type="chips">Wealth</button>
+          <button class="flex-1 py-3 text-on-surface-variant border-b-2 border-transparent font-bold uppercase text-xs tracking-widest leaderboard-tab" data-type="winrate">Win Rate</button>
         </div>
-        
-        <div class="leaderboard-list" id="leaderboard-list">
-          <div class="leaderboard-loading">加载中...</div>
-        </div>
+        <div id="leaderboard-list" class="flex-1 overflow-y-auto p-4 space-y-2"></div>
       </div>
     </div>
 
     <!-- Recharge Panel -->
-    <div id="recharge-panel" class="recharge-panel hidden">
-      <div class="recharge-content">
-        <div class="recharge-header">
-          <h3>💰 充值筹码</h3>
-          <button class="btn-close" id="recharge-close">✕</button>
+    <div id="recharge-panel" class="hidden fixed inset-0 z-[120] bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div class="w-full max-w-sm bg-surface-container-high rounded-2xl border border-outline-variant/20 shadow-2xl flex flex-col">
+        <div class="flex justify-between items-center p-6 border-b border-outline-variant/10">
+          <h3 class="font-headline font-bold text-xl text-primary">Load Funds</h3>
+          <button id="recharge-close" class="text-on-surface-variant hover:text-error text-2xl font-black">&times;</button>
         </div>
-        
-        <div class="recharge-info">
-          <div class="recharge-rate">
-            <span class="rate-label">汇率</span>
-            <span class="rate-value" id="recharge-rate">1 USDT/USDC = 10,000 筹码</span>
+        <div class="p-6 space-y-4">
+          <div>
+            <label class="block text-[10px] uppercase font-bold text-on-surface-variant mb-1">Select Token</label>
+            <select id="recharge-token" class="w-full bg-surface-container-low border border-outline-variant/20 rounded px-3 py-2 text-sm text-on-surface">
+              <option value="USDT">USDT</option>
+              <option value="USDC">USDC</option>
+              <option value="ETH">ETH</option>
+            </select>
           </div>
-          <div class="recharge-wallet">
-            <span class="wallet-label">充值地址</span>
-            <span class="wallet-value" id="recharge-wallet-address">-</span>
-            <button class="btn btn-sm btn-ghost" id="btn-copy-address">复制</button>
+          <div>
+             <label class="block text-[10px] uppercase font-bold text-on-surface-variant mb-1">Amount</label>
+             <input type="number" id="recharge-amount" class="w-full bg-surface-container-low border border-outline-variant/20 rounded px-3 py-2 text-sm text-on-surface" value="10" />
           </div>
-        </div>
-
-        <div class="recharge-form">
-          <div class="form-group">
-            <label>选择代币</label>
-            <div class="token-selector">
-              <button class="token-option active" data-token="USDT">USDT</button>
-              <button class="token-option" data-token="USDC">USDC</button>
-            </div>
+          <div class="bg-surface-container-highest p-3 rounded-lg flex justify-between items-center">
+             <span class="text-xs text-on-surface-variant font-bold uppercase">Receive Chips</span>
+             <span id="recharge-chip-amount" class="text-secondary font-headline font-black text-lg">100,000</span>
           </div>
-          
-          <div class="form-group">
-            <label>充值数量</label>
-            <div class="amount-input">
-              <input type="number" id="recharge-amount" placeholder="输入数量" min="1" step="0.01" />
-              <span class="amount-token" id="amount-token-label">USDT</span>
-            </div>
-            <p class="amount-hint">最小充值: <span id="min-amount">1</span> USDT/USDC</p>
-          </div>
-          
-          <div class="form-group">
-            <label>可获得筹码</label>
-            <div class="chips-preview">
-              <span id="chips-preview">0</span> 筹码
-            </div>
-          </div>
-          
-          <button id="btn-create-order" class="btn btn-primary btn-lg w-full" disabled>
-            创建充值订单
-          </button>
-        </div>
-
-        <div class="recharge-orders">
-          <h4>充值记录</h4>
-          <div id="recharge-history" class="recharge-history"></div>
+          <button id="btn-create-order" class="w-full py-3 bg-secondary text-on-secondary-container font-headline font-bold uppercase tracking-widest rounded shadow-xl mt-4">Create Order</button>
+          <button id="btn-recharge-history" class="w-full py-2 text-on-surface-variant underline text-xs font-bold uppercase mt-2">View History</button>
         </div>
       </div>
     </div>
 
-    <!-- Order Status Panel -->
-    <div id="order-panel" class="order-panel hidden">
-      <div class="order-content">
-        <div class="order-header">
-          <h3>订单详情</h3>
-          <button class="btn-close" id="order-close">✕</button>
+    <!-- Recharge History Panel -->
+    <div id="order-history-panel" class="hidden fixed inset-0 z-[130] bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div class="w-full max-w-xl bg-surface-container-high rounded-2xl border border-outline-variant/20 shadow-2xl flex flex-col max-h-[80vh]">
+        <div class="flex justify-between items-center p-6 border-b border-outline-variant/10">
+          <h3 class="font-headline font-bold text-xl text-primary">Transaction History</h3>
+          <button id="order-history-close" class="text-on-surface-variant hover:text-error text-2xl font-black">&times;</button>
         </div>
-        
-        <div class="order-info">
-          <div class="order-row">
-            <span class="order-label">订单号</span>
-            <span class="order-value" id="order-no">-</span>
-          </div>
-          <div class="order-row">
-            <span class="order-label">金额</span>
-            <span class="order-value" id="order-amount">-</span>
-          </div>
-          <div class="order-row">
-            <span class="order-label">筹码</span>
-            <span class="order-value" id="order-chips">-</span>
-          </div>
-          <div class="order-row">
-            <span class="order-label">状态</span>
-            <span class="order-value" id="order-status">-</span>
-          </div>
-        </div>
-        
-        <div class="order-tx" id="order-tx-section">
-          <p class="text-muted text-sm">交易已提交，请等待区块链确认...</p>
-          <div class="tx-hash">
-            <span id="order-tx-hash">-</span>
-          </div>
-        </div>
-        
-        <div class="order-pending" id="order-pending-section">
-          <p class="text-muted">请在钱包中完成转账</p>
-          <div class="transfer-info">
-            <p>转账地址: <span id="order-to-address">-</span></p>
-            <p>转账数量: <span id="order-token-amount">-</span></p>
-          </div>
-          <div class="form-group mt-10">
-            <label>交易哈希 (转账完成后填写)</label>
-            <input type="text" id="tx-hash-input" placeholder="0x..." />
-          </div>
-          <button id="btn-submit-tx" class="btn btn-primary w-full">提交交易哈希</button>
-        </div>
-        
-        <button id="btn-refresh-order" class="btn btn-ghost w-full mt-10">刷新状态</button>
+        <div id="order-history-list" class="flex-1 overflow-y-auto p-4 space-y-2"></div>
       </div>
     </div>
-
-    <!-- Game Area -->
-    <div id="game-area" class="game-area hidden">
-      <!-- Spectator Banner -->
-      <div id="spectator-banner" class="spectator-banner hidden">
-        <span>👁️ 您正在观战</span>
-        <span id="spectator-count">观战者: 0</span>
-      </div>
-      <!-- Poker Table -->
-      <div class="table-container">
-        <div class="poker-table">
-          <!-- Opponent Seats (Supports up to 7 opponents for 8 max players) -->
-          <div class="seats">
-            <div class="seat seat-left-2" id="seat-5"></div>
-            <div class="seat seat-left-1" id="seat-6"></div>
-            <div class="seat seat-top-left" id="seat-1"></div>
-            <div class="seat seat-top" id="seat-2"></div>
-            <div class="seat seat-top-right" id="seat-3"></div>
-            <div class="seat seat-right-1" id="seat-7"></div>
-            <div class="seat seat-right-2" id="seat-4"></div>
-          </div>
-
-          <!-- Community Cards -->
-          <div class="community-area">
-            <div class="community-cards" id="community-cards"></div>
-            <div class="pot-display">
-              <span class="pot-label">底池</span>
-              <span class="pot-amount" id="pot-amount">0</span>
-            </div>
-          </div>
-
-          <!-- Player Seat -->
-          <div class="player-area">
-            <div class="seat seat-bottom" id="seat-0"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Action Bar -->
-      <div class="action-bar" id="action-bar">
-        <div class="timer-display hidden" id="timer-display">
-          <div class="timer-bar">
-            <div class="timer-progress" id="timer-progress"></div>
-          </div>
-          <span class="timer-text" id="timer-text">30s</span>
-        </div>
-        <div class="action-buttons" id="action-buttons"></div>
-        <div class="raise-controls hidden" id="raise-controls">
-          <input type="range" id="raise-slider" min="0" max="1000" step="10" />
-          <div class="raise-display">
-            <span id="raise-value">0</span>
-            <button id="btn-confirm-raise" class="btn btn-accent">确认加注</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Last Action Notification -->
-      <div class="notification hidden" id="notification"></div>
-    </div>
-
-    <!-- History Panel -->
-    <div class="history-toggle hidden" id="history-toggle">📋</div>
-    <div class="history-panel hidden" id="history-panel">
-      <div class="history-header">
-        <h3>对局记录</h3>
-        <button class="btn-close" id="history-close">✕</button>
-      </div>
-      <div class="history-list" id="history-list"></div>
-    </div>
-
-    <!-- Chat Panel -->
-    <div class="chat-toggle hidden" id="chat-toggle">💬</div>
-    <div class="chat-panel hidden" id="chat-panel">
-      <div class="chat-header">
-        <h3>聊天</h3>
-        <button class="btn-close" id="chat-close">✕</button>
-      </div>
-      <div class="chat-messages" id="chat-messages"></div>
-      <div class="chat-input-area">
-        <input type="text" id="chat-input" placeholder="输入消息..." maxlength="200" />
-        <button id="btn-send-chat" class="btn btn-primary btn-sm">发送</button>
-      </div>
-    </div>
-
-    <!-- Game Log -->
-    <div class="game-log" id="game-log"></div>
+    
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="wallet.js"></script>
   <script type="module" src="main.js"></script>
+
 </body>
 </html>
