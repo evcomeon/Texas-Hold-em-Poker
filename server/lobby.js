@@ -39,6 +39,23 @@ class LobbyManager {
     Object.keys(this.STAKE_LEVELS).forEach(level => {
       this.waitingQueue.set(level, []);
     });
+
+    // 可选注入：Bot 插件（不 require bots 模块，由上层注入）
+    this.getFillBotsProvider = null;
+    this.getPlayerChips = null;
+    this.broadcastDelegate = null; // 若设置，_broadcastToRoom 委托给此函数
+  }
+
+  setFillBotsProvider(fn) {
+    this.getFillBotsProvider = fn;
+  }
+
+  setGetPlayerChips(fn) {
+    this.getPlayerChips = fn;
+  }
+
+  setBroadcastDelegate(fn) {
+    this.broadcastDelegate = fn;
   }
 
   getStakeLevels() {
@@ -332,20 +349,29 @@ class LobbyManager {
       logger.info('lobby.fill_room', { roomId, playerId: player.id, elapsedMs: Date.now() - fillStart });
     }
 
-    // 2. 只要队列里还够开桌，就持续创建新桌，避免所有后续玩家都被塞成第一桌观战者。
+    // 2. 只要队列里有人，就持续创建新桌（不足时由可选 fillBotsProvider 补足）
     let createCount = 0;
-    while (queue.length >= this.MIN_PLAYERS) {
+    while (queue.length >= 1) {
       const createStart = Date.now();
-      const initialPlayerCount = Math.min(queue.length, this.MAX_PLAYERS);
-      const players = queue.splice(0, initialPlayerCount);
+      const humanCount = Math.min(queue.length, this.MAX_PLAYERS);
+      const players = queue.splice(0, humanCount);
       if (players.length === 0) break;
 
-      const roomId = this._createRoomWithPlayers(players, stakeLevel, stakeConfig, roomIdRefCb);
+      const fillBots = this.getFillBotsProvider ? this.getFillBotsProvider(players.length, stakeConfig) : [];
+      const allPlayers = [...players, ...fillBots];
+      if (allPlayers.length < this.MIN_PLAYERS) {
+        queue.unshift(...players);
+        break;
+      }
+
+      const roomId = this._createRoomWithPlayers(allPlayers, stakeLevel, stakeConfig, roomIdRefCb);
       createCount++;
       logger.info('lobby.room_created', {
         roomId,
         stakeLevel,
-        playerCount: players.length,
+        playerCount: allPlayers.length,
+        humanCount: players.length,
+        botCount: fillBots.length,
         elapsedMs: Date.now() - createStart,
       });
     }
@@ -487,8 +513,10 @@ class LobbyManager {
   
   // 广播房间状态给所有玩家和观战者
   _broadcastToRoom(roomId, room) {
-    const allUserIds = [...room.players.map(p => p.id), ...room.spectators];
-    
+    if (this.broadcastDelegate) {
+      this.broadcastDelegate(roomId, room);
+      return;
+    }
     for (const [sId, data] of this.connectedUsers.entries()) {
       if (data.roomId === roomId) {
         data.socket.emit('game:state', room.engine.getState(data.user.id));
@@ -554,19 +582,26 @@ class LobbyManager {
     const bustedPlayers = [];
     const activePlayers = [];
     for (const player of room.players) {
-      try {
-        const dbUser = await UserModel.findById(player.id);
-        if (dbUser) {
-          player.chips = dbUser.chips_balance;
+      const memChips = this.getPlayerChips ? this.getPlayerChips(player) : null;
+      if (memChips !== null) {
+        player.chips = memChips;
+      } else {
+        try {
+          const dbUser = await UserModel.findById(player.id);
+          if (dbUser) {
+            player.chips = dbUser.chips_balance;
+          }
+        } catch (e) {
+          logger.error('lobby.fetch_player_chips_failed', { roomId, userId: player.id, error: e });
         }
-      } catch (e) {
-        logger.error('lobby.fetch_player_chips_failed', { roomId, userId: player.id, error: e });
       }
-      
+
       if (player.chips < minChips && player.connectionState !== 'removed') {
         bustedPlayers.push(player);
         room.engine.markPlayerRemoved(player.id, 'busted');
-        room.engine.addSpectator(player.id);
+        if (typeof player.id !== 'number' || player.id >= 0) {
+          room.engine.addSpectator(player.id);
+        }
         
         for (const [sId, data] of this.connectedUsers.entries()) {
           if (data.user.id === player.id) {

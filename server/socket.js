@@ -28,22 +28,28 @@ function persistGameActionLog(payload) {
   });
 }
 
-async function saveChipsToDatabase(room) {
-  if (!room || !room.engine) return;
-  
-  const engine = room.engine;
-  if (engine.phase !== 'SHOWDOWN') return;
-  
-  for (const player of engine.players) {
-    try {
-      await UserModel.updateChips(player.id, player.chips);
-    } catch (e) {
-      logger.error('game.save_chips_failed', { userId: player.id, error: e });
+function createSaveChipsToDatabase(shouldSkipChipsSave) {
+  return async function saveChipsToDatabase(room) {
+    if (!room || !room.engine) return;
+    
+    const engine = room.engine;
+    if (engine.phase !== 'SHOWDOWN') return;
+    
+    for (const player of engine.players) {
+      if (shouldSkipChipsSave?.(player)) continue;
+      try {
+        await UserModel.updateChips(player.id, player.chips);
+      } catch (e) {
+        logger.error('game.save_chips_failed', { userId: player.id, error: e });
+      }
     }
-  }
+  };
 }
 
-function configureSockets(server) {
+function configureSockets(server, opts = {}) {
+  const { fillBotsProvider, getPlayerChips, onAfterBroadcast, shouldSkipChipsSave } = opts;
+  const saveChipsToDatabase = createSaveChipsToDatabase(shouldSkipChipsSave);
+
   const corsOrigins = process.env.CORS_ORIGINS 
     ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
     : '*';
@@ -57,6 +63,8 @@ function configureSockets(server) {
   });
 
   const lobby = new LobbyManager();
+  if (fillBotsProvider) lobby.setFillBotsProvider(fillBotsProvider);
+  if (getPlayerChips) lobby.setGetPlayerChips(getPlayerChips);
 
   // Middleware for authentication
   io.use(async (socket, next) => {
@@ -546,7 +554,29 @@ function configureSockets(server) {
         }
       }
     }
+
+    if (eventName === 'game:state' && onAfterBroadcast) {
+      const broadcast = () => broadcastToRoom(io, roomId, room, lobby);
+      const handleAllReady = async () => {
+        const stakeConfig = lobby.getStakeLevels()[room.stakeLevel || 'medium'];
+        const matchResult = await lobby.startNewHandWithSpectators(roomId, stakeConfig);
+        if (!matchResult?.canStart) {
+          room.engine.phase = 'FINISHED';
+          await broadcastToRoom(io, roomId, room, lobby, 'game:notification', {
+            msg: '玩家不足，游戏结束。请充值后继续游戏。',
+          });
+          await broadcastToRoom(io, roomId, room, lobby);
+          return;
+        }
+        room.chipsSaved = false;
+        room.engine.nextHand();
+        await broadcastToRoom(io, roomId, room, lobby);
+      };
+      await onAfterBroadcast(io, roomId, room, lobby, { broadcast, handleAllReady });
+    }
   }
+
+  lobby.setBroadcastDelegate((roomId, room) => broadcastToRoom(io, roomId, room, lobby));
   
   // Helper: 根据用户ID和房间ID查找socket
   function findSocketByUserId(userId, roomId, lobby) {

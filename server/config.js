@@ -88,6 +88,12 @@ const config = {
     confirmationBlocks: getInt('CONFIRMATION_BLOCKS', 3),
     orderCheckIntervalMs: getInt('ORDER_CHECK_INTERVAL', 5000),
   },
+  bots: {
+    enableFillBots: process.env.ENABLE_FILL_BOTS !== 'false',
+    botFillCount: getInt('BOT_FILL_COUNT', 2),
+    botMinHumansToFill: getInt('BOT_MIN_HUMANS_TO_FILL', 3),
+    botThinkDelayMs: getInt('BOT_THINK_DELAY_MS', 1500),
+  },
 };
 
 module.exports = config;

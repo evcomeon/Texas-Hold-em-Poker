@@ -42,9 +42,26 @@ app.get('/api/health', (req, res) => {
 const http = require('http');
 const server = http.createServer(app);
 
+// 可选 Bot 插件：真人 < 3 时自动填充陪玩机器人
+let socketOpts = {};
+if (config.bots?.enableFillBots) {
+  try {
+    const botPlugin = require('./bots/fillBot');
+    socketOpts = {
+      fillBotsProvider: botPlugin.createFillBotsProvider(config.bots),
+      getPlayerChips: botPlugin.createGetPlayerChips(),
+      onAfterBroadcast: botPlugin.createBotTurnDriver(config.bots),
+      shouldSkipChipsSave: botPlugin.createShouldSkipChipsSave(),
+    };
+    logger.info('bot_plugin.loaded');
+  } catch (e) {
+    logger.warn('bot_plugin_unavailable', { error: e.message });
+  }
+}
+
 // Mount Socket.IO
 const configureSockets = require('./socket');
-const io = configureSockets(server);
+const io = configureSockets(server, socketOpts);
 
 // Initialize Database and Start Server
 async function startServer() {
