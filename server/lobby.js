@@ -508,6 +508,9 @@ class LobbyManager {
       roomIdRefCb(roomId, players, engine, false, false);
     }
 
+    const room = this.activeGames.get(roomId);
+    this._broadcastToRoom(roomId, room);
+
     return roomId;
   }
   
