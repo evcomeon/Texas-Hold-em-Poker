@@ -6,6 +6,7 @@
   <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700;900&family=Manrope:wght@200;300;400;500;600;700;800&display=swap" rel="stylesheet"/>
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script id="tailwind-config">
     tailwind.config = {
       darkMode: "class",
@@ -408,6 +409,17 @@
           <button id="order-history-close" class="text-on-surface-variant hover:text-error text-2xl font-black">&times;</button>
         </div>
         <div id="order-history-list" class="flex-1 overflow-y-auto p-4 space-y-2"></div>
+      </div>
+    </div>
+    
+    <!-- Wallet Modal -->
+    <div id="wallet-modal" class="hidden fixed inset-0 z-[140] bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div class="w-full max-w-sm bg-surface-container-highest rounded-2xl border border-outline-variant/20 shadow-2xl flex flex-col pt-2 pb-6 px-6">
+        <div class="flex justify-between items-center mb-4 mt-2">
+          <h3 class="font-headline font-bold text-lg text-secondary">Connect Wallet</h3>
+          <button id="wallet-modal-close" class="text-on-surface-variant hover:text-error text-2xl font-black">&times;</button>
+        </div>
+        <div id="wallet-list" class="overflow-y-auto space-y-2 max-h-[60vh]"></div>
       </div>
     </div>
     

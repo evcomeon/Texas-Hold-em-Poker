@@ -1117,11 +1117,13 @@ function showWalletModal(wallets) {
   if (installedWallets.length > 0) {
     installedWallets.forEach(wallet => {
       html += `
-        <div class="wallet-item installed" data-wallet="${wallet.name}">
-          <div class="wallet-icon">${wallet.icon}</div>
-          <div class="wallet-info">
-            <div class="wallet-name">${wallet.name}</div>
-            <div class="wallet-status installed">已安装</div>
+        <div class="wallet-item installed flex items-center justify-between p-4 mb-2 bg-surface-container border border-outline-variant/30 rounded-lg cursor-pointer hover:bg-surface-container-high transition-colors shadow" data-wallet="${wallet.name}">
+          <div class="flex items-center gap-4">
+            <div class="w-10 h-10 flex items-center justify-center bg-surface-container-highest rounded-full text-2xl">${wallet.icon}</div>
+            <div class="flex flex-col">
+              <span class="font-bold text-on-surface">${wallet.name}</span>
+              <span class="text-[10px] text-success font-bold uppercase tracking-widest leading-none mt-1">Installed</span>
+            </div>
           </div>
         </div>
       `;
@@ -1132,13 +1134,15 @@ function showWalletModal(wallets) {
   if (notInstalledWallets.length > 0) {
     notInstalledWallets.forEach(wallet => {
       html += `
-        <a href="${wallet.url}" target="_blank" class="wallet-item not-installed">
-          <div class="wallet-icon">${wallet.icon}</div>
-          <div class="wallet-info">
-            <div class="wallet-name">${wallet.name}</div>
-            <div class="wallet-status not-installed">未安装</div>
+        <a href="${wallet.url}" target="_blank" class="wallet-item not-installed flex items-center justify-between p-4 mb-2 bg-surface-container/50 border border-outline-variant/10 rounded-lg cursor-pointer hover:bg-surface-container-high transition-colors">
+          <div class="flex items-center gap-4 opacity-70">
+            <div class="w-10 h-10 flex items-center justify-center bg-surface-container-lowest rounded-full text-2xl">${wallet.icon}</div>
+            <div class="flex flex-col">
+              <span class="font-bold text-on-surface-variant">${wallet.name}</span>
+              <span class="text-[10px] text-on-surface-variant/50 font-bold uppercase tracking-widest leading-none mt-1">Not Installed</span>
+            </div>
           </div>
-          <span class="wallet-action">安装</span>
+          <span class="text-[10px] font-bold text-secondary px-3 py-1 bg-secondary/10 rounded uppercase">Install</span>
         </a>
       `;
     });
@@ -1147,10 +1151,13 @@ function showWalletModal(wallets) {
   // 如果没有检测到任何钱包
   if (wallets.length === 0) {
     html = `
-      <div class="no-wallet-msg">
-        <p>未检测到 Web3 钱包</p>
-        <p>请安装以下钱包之一：</p>
-        <a href="https://metamask.io/download/" target="_blank" class="btn btn-primary">安装 MetaMask</a>
+      <div class="flex flex-col items-center justify-center py-6 text-center space-y-4">
+        <span class="material-symbols-outlined text-4xl text-on-surface-variant">account_balance_wallet</span>
+        <div class="space-y-1">
+          <p class="text-on-surface text-sm font-bold">No Web3 Wallets Detected</p>
+          <p class="text-on-surface-variant text-xs">Please install one to continue.</p>
+        </div>
+        <a href="https://metamask.io/download/" target="_blank" class="px-6 py-3 bg-secondary text-background font-bold uppercase tracking-widest text-xs rounded shadow-lg">Install MetaMask</a>
       </div>
     `;
   }
