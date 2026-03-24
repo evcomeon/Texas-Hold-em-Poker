@@ -904,10 +904,8 @@ function renderActions() {
     els.raiseSlider.value = minRaise;
     els.raiseValue.textContent = minRaise;
     els.raiseControls.classList.remove('hidden');
-    els.actionButtons.classList.add('hidden');
   } else {
     els.raiseControls.classList.add('hidden');
-    els.actionButtons.classList.remove('hidden');
   }
 }
 
