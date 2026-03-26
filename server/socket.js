@@ -349,6 +349,18 @@ function configureSockets(server, opts = {}) {
       socket.emit('table:update', lobby.getTables());
     });
 
+    socket.on('lobby:quit', () => {
+      logger.info('socket.lobby_quit', {
+        socketId: socket.id,
+        userId: socket.user.id,
+      });
+
+      lobby.leaveQueue(socket.user.id);
+      lobby.removeConnectedUser(socket.id);
+      
+      socket.emit('lobby:quit_success');
+    });
+
     // ── 主动离开游戏 ─────────────────────────────────
 
     socket.on('game:leave', async () => {

@@ -164,6 +164,7 @@
         </div>
 
         <button id="btn-find-match" class="btn btn-primary btn-lg pulse-btn">开始匹配</button>
+        <button id="btn-quit-game" class="btn btn-ghost btn-lg mt-10">退出游戏</button>
       </div>
     </div>
 
@@ -346,6 +347,11 @@
 
     <!-- Game Area -->
     <div id="game-area" class="game-area hidden">
+      <!-- Top Bar with Leave Button -->
+      <div class="game-top-bar">
+        <button id="btn-leave-table" class="btn btn-ghost btn-sm">← 返回大厅</button>
+        <span id="game-room-id" class="room-id-badge"></span>
+      </div>
       <!-- Spectator Banner -->
       <div id="spectator-banner" class="spectator-banner hidden">
         <span>👁️ 您正在观战</span>

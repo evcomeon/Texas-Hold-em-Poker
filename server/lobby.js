@@ -682,6 +682,11 @@ class LobbyManager {
     return this.connectedUsers.size;
   }
 
+  removeConnectedUser(socketId) {
+    this.connectedUsers.delete(socketId);
+    this.emitTablesUpdate();
+  }
+
   handleReconnect(user, socket, roomId, isSpectator = false) {
     this.connectedUsers.set(socket.id, {
       user,

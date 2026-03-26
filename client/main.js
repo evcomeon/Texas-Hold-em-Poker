@@ -2065,6 +2065,26 @@ function setupEventListeners() {
     if (socket) socket.emit('lobby:leave');
   });
 
+  const btnLeaveTable = document.getElementById('btn-leave-table');
+  if (btnLeaveTable) {
+    btnLeaveTable.addEventListener('click', () => {
+      if (socket) {
+        socket.emit('game:leave');
+      }
+    });
+  }
+
+  const btnQuitGame = document.getElementById('btn-quit-game');
+  if (btnQuitGame) {
+    btnQuitGame.addEventListener('click', () => {
+      if (socket) {
+        socket.emit('lobby:quit');
+        socket.disconnect();
+      }
+      logout();
+    });
+  }
+
   els.historyToggle.addEventListener('click', () => {
     els.historyPanel.classList.remove('hidden');
     if (socket) socket.emit('game:history');
