@@ -23,6 +23,20 @@ function persistGameActionLog(payload) {
 }
 
 class LobbyManager {
+  // Helper: 删除空房间并记录日志
+  _maybeDeleteRoom(roomId) {
+    const room = this.activeGames.get(roomId);
+    if (!room) return;
+    // 过滤掉已标记为 REMOVED 的玩家
+    const remainingPlayers = room.players.filter(p => p.connectionState !== 'removed');
+    // 如果没有玩家或仅剩不到两名活跃玩家，且没有观战者，则删除房间
+    if ((remainingPlayers.length === 0 || remainingPlayers.length < 2) && room.spectators.length === 0) {
+      this.activeGames.delete(roomId);
+      this.tables.delete(roomId);
+      logger.info('lobby.room_removed', { roomId, reason: 'empty' });
+    }
+  }
+
   constructor() {
     this.connectedUsers = new Map(); // socketId -> { user, socket, roomId, isSpectator }
     this.waitingQueue = new Map(); // stakeLevel -> Array of user objects
@@ -420,13 +434,11 @@ class LobbyManager {
     data.roomId = null;
     data.isSpectator = false;
 
-    // 清理：房间空了就删除
+    // 清理：房间空了就删除（使用统一方法）
+    this._maybeDeleteRoom(roomId);
+    // 若未删除则更新桌子信息
     const remainingPlayers = room.players.filter(p => p.connectionState !== 'removed');
-    if (remainingPlayers.length === 0 && room.spectators.length === 0) {
-      this.activeGames.delete(roomId);
-      this.tables.delete(roomId);
-      logger.info('lobby.room_removed', { roomId, reason: 'empty' });
-    } else {
+    if (remainingPlayers.length > 0 || room.spectators.length > 0) {
       this._updateTableInfo(roomId);
     }
     this.emitTablesUpdate();
@@ -913,6 +925,9 @@ class LobbyManager {
     const activePlayers = room.players.filter(p => p.connectionState !== 'removed' && p.chips > 0);
     if (activePlayers.length < 2) {
       room.engine.phase = 'FINISHED';
+      // 删除空房间（若没有剩余玩家）
+      this._maybeDeleteRoom(roomId);
+      // 通知仍在该房间的用户（如果还有的话）
       for (const [sId, data] of this.connectedUsers.entries()) {
         if (data.roomId === roomId) {
           data.socket.emit('game:notification', {
@@ -962,6 +977,9 @@ class LobbyManager {
     const activePlayers = room.engine.players.filter(p => p.connectionState !== 'removed' && p.chips > 0);
     if (activePlayers.length < 2) {
       room.engine.phase = 'FINISHED';
+      // 删除空房间（若没有剩余玩家）
+      this._maybeDeleteRoom(roomId);
+      // 通知仍在该房间的用户（如果还有的话）
       for (const [sId, data] of this.connectedUsers.entries()) {
         if (data.roomId === roomId) {
           data.socket.emit('game:notification', {

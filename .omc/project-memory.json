@@ -1,0 +1,183 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1774507847554,
+  "projectRoot": "/Users/evmbp/poker-game",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "jest",
+        "version": "29.0.0",
+        "category": "testing"
+      }
+    ],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "npm test",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {
+      "test": "jest"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "assets",
+      "docs",
+      "scripts"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "assets": {
+      "path": "assets",
+      "purpose": "Static assets",
+      "fileCount": 3,
+      "lastAccessed": 1774507847331,
+      "keyFiles": [
+        "hand_2_result.png",
+        "showdown_result.png",
+        "start_screen.png"
+      ]
+    },
+    "client": {
+      "path": "client",
+      "purpose": null,
+      "fileCount": 13,
+      "lastAccessed": 1774507847334,
+      "keyFiles": [
+        "client.log",
+        "index.html",
+        "main.js",
+        "package-lock.json",
+        "package.json"
+      ]
+    },
+    "clients": {
+      "path": "clients",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1774507847448,
+      "keyFiles": []
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 7,
+      "lastAccessed": 1774507847450,
+      "keyFiles": [
+        "API.md",
+        "CONFIG-guide.md",
+        "DEPLOY-vercel-railway.md",
+        "LOGGING-guide.md",
+        "PRD-wallet-bind-recharge.md"
+      ]
+    },
+    "nginx": {
+      "path": "nginx",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1774507847451,
+      "keyFiles": [
+        "nginx-ssl.conf",
+        "nginx.conf",
+        "start.sh"
+      ]
+    },
+    "recharge-service": {
+      "path": "recharge-service",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1774507847452,
+      "keyFiles": [
+        "README.md",
+        "package.json"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 3,
+      "lastAccessed": 1774507847453,
+      "keyFiles": [
+        "analyze_logs.js",
+        "backup.sh",
+        "deploy.sh"
+      ]
+    },
+    "server": {
+      "path": "server",
+      "purpose": null,
+      "fileCount": 18,
+      "lastAccessed": 1774507847466,
+      "keyFiles": [
+        "auth.js",
+        "config.js",
+        "gen-test-tokens.js",
+        "index.js",
+        "lobby.js"
+      ]
+    },
+    "client/__tests__": {
+      "path": "client/__tests__",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1774507847468,
+      "keyFiles": [
+        "tableThumbnails.test.js"
+      ]
+    },
+    "client/node_modules": {
+      "path": "client/node_modules",
+      "purpose": "Dependencies",
+      "fileCount": 1,
+      "lastAccessed": 1774507847469,
+      "keyFiles": []
+    },
+    "recharge-service/src": {
+      "path": "recharge-service/src",
+      "purpose": "Source code",
+      "fileCount": 2,
+      "lastAccessed": 1774507847471,
+      "keyFiles": [
+        "index.js",
+        "monitor.js"
+      ]
+    },
+    "server/config": {
+      "path": "server/config",
+      "purpose": "Configuration files",
+      "fileCount": 1,
+      "lastAccessed": 1774507847482,
+      "keyFiles": [
+        "index.js"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}
