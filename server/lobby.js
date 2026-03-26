@@ -3,6 +3,7 @@
 // ============================================================
 
 const crypto = require('crypto');
+const { EventEmitter } = require('events');
 const uuidv4 = crypto.randomUUID ? () => crypto.randomUUID() : () => Math.random().toString(36).substring(2) + Date.now().toString(36);
 const GameEngine = require('./game/engine');
 const UserModel = require('./models/user');
@@ -23,18 +24,22 @@ function persistGameActionLog(payload) {
 }
 
 class LobbyManager {
-  // Helper: 删除空房间并记录日志
-  _maybeDeleteRoom(roomId) {
+  // Helper: 删除空房间并记录日志（统一入口）
+  _maybeDeleteRoom(roomId, reason = 'empty') {
+    this.events.emit('room:maybeDelete', { roomId, reason });
+  }
+
+  // 真正执行房间删除的逻辑
+  _handleRoomDeletion(roomId, reason) {
     const room = this.activeGames.get(roomId);
     if (!room) return;
-    // 过滤掉已标记为 REMOVED 的玩家
-    const remainingPlayers = room.players.filter(p => p.connectionState !== 'removed');
-    // 如果没有玩家或仅剩不到两名活跃玩家，且没有观战者，则删除房间
-    if ((remainingPlayers.length === 0 || remainingPlayers.length < 2) && room.spectators.length === 0) {
-      this.activeGames.delete(roomId);
-      this.tables.delete(roomId);
-      logger.info('lobby.room_removed', { roomId, reason: 'empty' });
-    }
+    // 持久化筹码或日志可在此处添加（若需要）
+    // 直接删除数据结构
+    this.activeGames.delete(roomId);
+    this.tables.delete(roomId);
+    logger.info('lobby.room_removed', { roomId, reason });
+    // 广播最新的桌子列表，使前端 UI 立即更新
+    this.emitTablesUpdate();
   }
 
   constructor() {
@@ -44,6 +49,11 @@ class LobbyManager {
     this.tables = new Map(); // roomId -> TableInfo
     this.queueCheckTimers = new Map(); // stakeLevel -> timeout id
     this.io = null; // Socket.IO 实例，用于广播
+    // Event system for unified room cleanup
+    this.events = new EventEmitter();
+    this.events.on('room:maybeDelete', ({ roomId, reason }) => {
+      this._handleRoomDeletion(roomId, reason);
+    });
     
     // Config
     this.MIN_PLAYERS = config.game.minPlayers;  // 最少玩家数
