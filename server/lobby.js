@@ -7,6 +7,7 @@ const uuidv4 = crypto.randomUUID ? () => crypto.randomUUID() : () => Math.random
 const GameEngine = require('./game/engine');
 const UserModel = require('./models/user');
 const GameActionLogModel = require('./models/gameActionLog');
+const { TableInfo } = require('./models/table');
 const logger = require('./lib/logger');
 const config = require('./config');
 
@@ -26,7 +27,9 @@ class LobbyManager {
     this.connectedUsers = new Map(); // socketId -> { user, socket, roomId, isSpectator }
     this.waitingQueue = new Map(); // stakeLevel -> Array of user objects
     this.activeGames = new Map(); // roomId -> { engine, players: [], spectators: [], maxPlayers: number, stakeLevel }
+    this.tables = new Map(); // roomId -> TableInfo
     this.queueCheckTimers = new Map(); // stakeLevel -> timeout id
+    this.io = null; // Socket.IO 实例，用于广播
     
     // Config
     this.MIN_PLAYERS = config.game.minPlayers;  // 最少玩家数
@@ -58,8 +61,47 @@ class LobbyManager {
     this.broadcastDelegate = fn;
   }
 
+  setIo(io) {
+    this.io = io;
+  }
+
   getStakeLevels() {
     return this.STAKE_LEVELS;
+  }
+
+  getTables() {
+    const tables = [];
+    for (const [roomId, tableInfo] of this.tables.entries()) {
+      tables.push(tableInfo.toJSON());
+    }
+    return tables;
+  }
+
+  emitTablesUpdate() {
+    if (this.io) {
+      this.io.emit('table:update', this.getTables());
+    }
+  }
+
+  _updateTableInfo(roomId) {
+    const room = this.activeGames.get(roomId);
+    if (!room) {
+      this.tables.delete(roomId);
+      return;
+    }
+
+    let tableInfo = this.tables.get(roomId);
+    if (!tableInfo) {
+      tableInfo = new TableInfo(roomId, room.stakeLevel, this.STAKE_LEVELS[room.stakeLevel]);
+      this.tables.set(roomId, tableInfo);
+    }
+
+    tableInfo.players = [];
+    for (const p of room.engine.players) {
+      tableInfo.addPlayer(p);
+    }
+    tableInfo.setSpectatorCount(room.spectators.length);
+    tableInfo.setPhase(room.engine.phase);
   }
 
   onDisconnect(socketId) {
@@ -88,6 +130,8 @@ class LobbyManager {
             this._broadcastToRoom(data.roomId, room);
           }
         }
+        this._updateTableInfo(data.roomId);
+        this.emitTablesUpdate();
       }
     }
     
@@ -223,6 +267,98 @@ class LobbyManager {
     }
   }
 
+  async joinSpecificTable(user, socket, tableId, roomIdRefCb) {
+    const room = this.activeGames.get(tableId);
+    
+    if (!room) {
+      return { success: false, error: 'table_not_found' };
+    }
+
+    const tableInfo = this.tables.get(tableId);
+    if (tableInfo && tableInfo.isFull()) {
+      const suggestedRoomId = await this.joinRandom(user, socket, roomIdRefCb);
+      return { 
+        success: false, 
+        error: 'full', 
+        suggestedRoomId 
+      };
+    }
+
+    const existingPlayer = room.engine.players.find(p => p.id === user.id);
+    if (existingPlayer) {
+      return { success: false, error: 'already_in_table' };
+    }
+
+    const playerChips = user.chips || 0;
+    const playerName = user.name || user.username;
+
+    if (playerChips < room.engine.bigBlind) {
+      // insufficient chips – reject join
+      return { success: false, error: 'insufficient_chips' };
+    }
+
+    room.engine.addPlayer({
+          connectionState: 'waiting',
+      id: user.id,
+      name: playerName,
+      picture: user.picture,
+      chips: playerChips
+    });
+
+    for (const [sId, data] of this.connectedUsers.entries()) {
+      if (data.user.id === user.id) {
+        data.roomId = tableId;
+        data.isSpectator = false;
+        break;
+      }
+    }
+
+    if (roomIdRefCb) {
+      roomIdRefCb(tableId, room.engine.players, room.engine, false, false);
+    }
+
+    this._updateTableInfo(tableId);
+    this.emitTablesUpdate();
+    this._broadcastToRoom(tableId, room);
+
+    logger.info('lobby.join_specific_table', {
+      tableId,
+      userId: user.id,
+      playerName,
+      playerCount: room.engine.players.length
+    });
+
+    return { success: true, roomId: tableId };
+  }
+
+  async joinRandom(user, socket, roomIdRefCb, stakeLevel = 'medium') {
+    let availableTables = [];
+    
+    for (const [roomId, tableInfo] of this.tables.entries()) {
+      if (!tableInfo.isFull() && tableInfo.stakeLevel === stakeLevel) {
+        availableTables.push({
+          roomId,
+          playerCount: tableInfo.getPlayerCount(),
+          createdAt: tableInfo.createdAt
+        });
+      }
+    }
+
+    availableTables.sort((a, b) => {
+      if (a.playerCount !== b.playerCount) {
+        return b.playerCount - a.playerCount;
+      }
+      return a.createdAt - b.createdAt;
+    });
+
+    if (availableTables.length > 0) {
+      const targetRoomId = availableTables[0].roomId;
+      return this.joinSpecificTable(user, socket, targetRoomId, roomIdRefCb);
+    }
+
+    return this.joinQueue(user, socket, roomIdRefCb, stakeLevel);
+  }
+
   /**
    * 玩家主动离开游戏房间（非掉线）
    * 与 onDisconnect 的区别：不缓存重连状态，直接清理干净
@@ -288,8 +424,12 @@ class LobbyManager {
     const remainingPlayers = room.players.filter(p => p.connectionState !== 'removed');
     if (remainingPlayers.length === 0 && room.spectators.length === 0) {
       this.activeGames.delete(roomId);
+      this.tables.delete(roomId);
       logger.info('lobby.room_removed', { roomId, reason: 'empty' });
+    } else {
+      this._updateTableInfo(roomId);
     }
+    this.emitTablesUpdate();
 
     return { roomId, room, userName, wasSpectator };
   }
@@ -508,6 +648,9 @@ class LobbyManager {
       roomIdRefCb(roomId, players, engine, false, false);
     }
 
+    this._updateTableInfo(roomId);
+    this.emitTablesUpdate();
+
     const room = this.activeGames.get(roomId);
     this._broadcastToRoom(roomId, room);
 
@@ -626,9 +769,21 @@ class LobbyManager {
     }
     
     for (const busted of bustedPlayers) {
+      if (typeof busted.id === 'number' && busted.id < 0) {
+        // Bot 爆仓后直接退出，不进入观战列表
+        continue;
+      }
       if (!room.spectators.includes(busted.id)) {
         room.spectators.push(busted.id);
       }
+    }
+
+    const bustedBotIds = bustedPlayers
+      .filter((player) => typeof player.id === 'number' && player.id < 0)
+      .map((player) => player.id);
+    if (bustedBotIds.length > 0) {
+      // Bot 账号直接离桌，避免继续占用房间玩家位
+      room.players = room.players.filter((player) => !bustedBotIds.includes(player.id));
     }
     
     // 2. 将有足够筹码的观战者转为玩家（如果还有空位）
