@@ -3,6 +3,7 @@
 // ============================================================
 
 import { walletConnector } from './wallet.js';
+import { renderTables } from './tableThumbnails.js';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 
@@ -15,6 +16,8 @@ let socket = null;
 let selectedStakeLevel = 'medium';
 let isManualLogout = false;
 let unreadChatCount = 0;
+let lobbyTables = [];
+let isJoinRequestInFlight = false;
 
 const GOOGLE_CLIENT_ID = '924040032747-oe8o9abs1ak5i293o6bkplub3h5bolmo.apps.googleusercontent.com';
 
@@ -358,8 +361,10 @@ function showLobby() {
   }
 
   // Reset lobby state
+  isJoinRequestInFlight = false;
   els.btnFindMatch.classList.remove('hidden');
   els.queueStatus.classList.add('hidden');
+  renderLobbyTables();
 }
 
 function showGame() {
@@ -474,13 +479,20 @@ function connectSocket() {
     els.globalOnline.textContent = `在线: ${data.online}`;
   });
 
+  socket.on('tables:update', (tables) => {
+    lobbyTables = Array.isArray(tables) ? tables : [];
+    renderLobbyTables();
+  });
+
   socket.on('lobby:queued', (data) => {
+    isJoinRequestInFlight = false;
     els.btnFindMatch.classList.add('hidden');
     els.queueStatus.classList.remove('hidden');
     els.queueCount.textContent = data.queueSize;
   });
 
   socket.on('lobby:error', (data) => {
+    isJoinRequestInFlight = false;
     if (data.error === '筹码不足') {
       showNotification(`筹码不足！需要至少 ${data.minChips} 筹码才能加入此级别游戏。当前筹码: ${data.currentChips}`, 'danger');
     } else {
@@ -489,16 +501,19 @@ function connectSocket() {
   });
 
   socket.on('lobby:left', () => {
+    isJoinRequestInFlight = false;
     els.btnFindMatch.classList.remove('hidden');
     els.queueStatus.classList.add('hidden');
   });
 
   socket.on('game:start', (data) => {
+    isJoinRequestInFlight = false;
     showGame();
     els.spectatorBanner.classList.add('hidden');
   });
   
   socket.on('game:spectator', (data) => {
+    isJoinRequestInFlight = false;
     showGame();
     showNotification(data.message, 'info');
     els.spectatorBanner.classList.remove('hidden');
@@ -551,6 +566,14 @@ function performAction(action, amount = 0) {
   if (socket) {
     socket.emit('game:action', { action, amount });
   }
+}
+
+function renderLobbyTables() {
+  renderTables(lobbyTables, (tableId) => {
+    if (socket) {
+      socket.emit('lobby:join_specific', { tableId });
+    }
+  });
 }
 
 function nextHand() {
@@ -2022,14 +2045,19 @@ function setupEventListeners() {
       document.querySelectorAll('.stake-option').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       selectedStakeLevel = btn.dataset.level;
+      renderLobbyTables();
     });
   });
 
   els.btnFindMatch.addEventListener('click', () => {
-    if (socket) socket.emit('lobby:join', { stakeLevel: selectedStakeLevel });
+    if (!socket || isJoinRequestInFlight || !els.queueStatus.classList.contains('hidden')) return;
+    isJoinRequestInFlight = true;
+    els.btnFindMatch.classList.add('hidden');
+    socket.emit('lobby:join', { stakeLevel: selectedStakeLevel });
   });
 
   els.btnCancelMatch.addEventListener('click', () => {
+    isJoinRequestInFlight = false;
     if (socket) socket.emit('lobby:leave');
   });
 

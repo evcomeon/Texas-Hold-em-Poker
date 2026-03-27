@@ -63,6 +63,7 @@ function configureSockets(server, opts = {}) {
   });
 
   const lobby = new LobbyManager();
+  lobby.io = io;
   if (fillBotsProvider) lobby.setFillBotsProvider(fillBotsProvider);
   if (getPlayerChips) lobby.setGetPlayerChips(getPlayerChips);
 
@@ -159,6 +160,7 @@ function configureSockets(server, opts = {}) {
     
     // Broadcast lobby stats
     io.emit('lobby:stats', { online: lobby.getOnlineCount() });
+    socket.emit('tables:update', Array.from(lobby.tables.values()));
 
     // ── Lobby Actions ──────────────────────────────────
     
@@ -261,6 +263,83 @@ function configureSockets(server, opts = {}) {
       // 从匹配队列中移除
       lobby.leaveQueue(socket.user.id);
       socket.emit('lobby:left');
+    });
+
+    socket.on('lobby:join_specific', async (data = {}) => {
+      const { tableId } = data;
+      if (!tableId) {
+        socket.emit('lobby:error', { error: '请提供牌桌 ID' });
+        return;
+      }
+
+      lobby.leaveQueue(socket.user.id);
+
+      const currentData = lobby.connectedUsers.get(socket.id);
+      if (currentData?.roomId && currentData.roomId !== tableId) {
+        lobby.leaveGame(socket.id);
+      }
+
+      const room = lobby.getRoom(tableId);
+      if (!room) {
+        socket.emit('lobby:error', { error: '牌桌不存在或已关闭' });
+        return;
+      }
+
+      const userData = lobby.connectedUsers.get(socket.id);
+      if (userData?.roomId === tableId) {
+        socket.emit('game:state', room.engine.getState(socket.user.id));
+        return;
+      }
+
+      const playerCount = room.players.filter((player) => player.connectionState !== 'removed').length;
+      const inProgress = room.engine.phase !== 'WAITING' && room.engine.phase !== 'FINISHED';
+      const isSpectator = inProgress;
+
+      if (!isSpectator && playerCount >= room.maxPlayers) {
+        socket.emit('lobby:error', { error: '牌桌已满' });
+        return;
+      }
+
+      if (isSpectator) {
+        if (!room.spectators.includes(socket.user.id)) {
+          room.spectators.push(socket.user.id);
+          room.engine.addSpectator(socket.user.id);
+        }
+      } else {
+        const added = room.engine.addPlayer(socket.user);
+        if (!added) {
+          socket.emit('lobby:error', { error: '加入牌桌失败，请稍后重试' });
+          return;
+        }
+      }
+
+      if (userData) {
+        userData.roomId = tableId;
+        userData.isSpectator = isSpectator;
+        userData.stakeLevel = room.stakeLevel;
+      }
+
+      socket.join(tableId);
+      lobby._updateTableInfo(tableId);
+      lobby.emitTablesUpdate();
+
+      if (isSpectator) {
+        socket.emit('game:spectator', { roomId: tableId, message: '您正在观战，下一手牌将加入游戏' });
+      } else {
+        socket.emit('game:start', { roomId: tableId });
+      }
+
+      await broadcastToRoom(io, tableId, room, lobby);
+
+      const joinMsg = isSpectator
+        ? `${socket.user.name || socket.user.username} 开始观战`
+        : `${socket.user.name || socket.user.username} 加入了桌子 (${room.players.filter((player) => player.connectionState !== 'removed').length}/${room.maxPlayers})`;
+
+      for (const [, otherData] of lobby.connectedUsers.entries()) {
+        if (otherData.roomId === tableId && otherData.user.id !== socket.user.id) {
+          otherData.socket.emit('game:notification', { msg: joinMsg });
+        }
+      }
     });
 
     // ── 主动离开游戏 ─────────────────────────────────

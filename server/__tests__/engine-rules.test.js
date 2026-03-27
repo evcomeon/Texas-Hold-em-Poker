@@ -78,6 +78,19 @@ describe('Disconnected players and hand start', () => {
   });
 });
 
+describe('Duplicate seat protection', () => {
+  test('createGame ignores duplicate user ids', () => {
+    const engine = makeEngine();
+    engine.createGame([
+      { id: 'u1', name: 'Alice', chips: 1000 },
+      { id: 'u1', name: 'Alice', chips: 1000 },
+      { id: 'u2', name: 'Bob', chips: 1000 },
+    ]);
+
+    expect(engine.players.map((player) => player.id)).toEqual(['u1', 'u2']);
+  });
+});
+
 // ────────────────────────────────────────────────────────────────
 // 3. Disconnected all-in player MUST participate in showdown
 // ────────────────────────────────────────────────────────────────

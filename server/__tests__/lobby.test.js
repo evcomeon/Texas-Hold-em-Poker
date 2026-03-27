@@ -88,8 +88,8 @@ const LobbyManager = require('../lobby');
 const logger = require('../lib/logger');
 
 // Helper to create a dummy socket with jest mock emit
-function createMockSocket() {
-  return { emit: jest.fn(), join: jest.fn() };
+function createMockSocket(id = 'sock-mock') {
+  return { id, emit: jest.fn(), join: jest.fn() };
 }
 
 describe('LobbyManager – room cleanup (TDD)', () => {
@@ -197,5 +197,74 @@ describe('LobbyManager – room cleanup (TDD)', () => {
 
     expect(() => lobby.onDisconnect('sock1')).not.toThrow();
     expect(room.engine.players.find((p) => p.id === 1).connectionState).toBe('disconnected');
+  });
+
+  test('joinQueue is idempotent while async validation is still in flight', async () => {
+    let resolveUserLookup;
+    const deferredLookup = new Promise((resolve) => {
+      resolveUserLookup = resolve;
+    });
+    const UserModel = require('../models/user');
+    UserModel.findById.mockImplementationOnce(() => deferredLookup);
+    UserModel.findById.mockImplementationOnce(() => deferredLookup);
+
+    const user = { id: 10, username: 'dup', chips: 100 };
+    const socket = createMockSocket('sock-dup');
+
+    const firstJoin = lobby.joinQueue(user, socket, null, 'medium');
+    const secondJoin = lobby.joinQueue(user, socket, null, 'medium');
+
+    resolveUserLookup(null);
+
+    const [firstResult, secondResult] = await Promise.all([firstJoin, secondJoin]);
+    const queue = lobby.waitingQueue.get('medium');
+
+    expect([firstResult, secondResult]).toContain(true);
+    expect([firstResult, secondResult].some((result) => result && result.error)).toBe(true);
+    expect(queue.filter((queuedUser) => queuedUser.id === user.id)).toHaveLength(1);
+  });
+
+  test('insufficient queued humans prefer spectating an active same-stake room before opening a bot room', () => {
+    lobby.setFillBotsProvider(() => [
+      { id: -1, username: 'bot-1', chips: 100 },
+    ]);
+
+    const roomId = lobby._createRoomWithPlayers(
+      [
+        { id: 1, username: 'alice', chips: 100 },
+        { id: 2, username: 'bob', chips: 100 },
+      ],
+      'medium',
+      { smallBlind: 10, bigBlind: 20 },
+      null
+    );
+    const room = lobby.getRoom(roomId);
+    room.engine.phase = 'PRE_FLOP';
+
+    const spectator = { id: 3, username: 'eve', chips: 100 };
+    const spectatorSocket = createMockSocket('sock-eve');
+    lobby.waitingQueue.get('medium').push(spectator);
+    lobby.connectedUsers.set('sock-eve', {
+      user: spectator,
+      socket: spectatorSocket,
+      roomId: null,
+      isSpectator: false,
+      stakeLevel: 'medium',
+    });
+
+    const roomJoinEvents = [];
+    lobby._checkQueue((joinedRoomId, players, engine, isSpectator) => {
+      roomJoinEvents.push({ joinedRoomId, playerIds: players.map((player) => player.id), isSpectator });
+    }, 'medium');
+
+    expect(lobby.activeGames.size).toBe(1);
+    expect(room.spectators).toContain(3);
+    expect(lobby.connectedUsers.get('sock-eve').roomId).toBe(roomId);
+    expect(lobby.connectedUsers.get('sock-eve').isSpectator).toBe(true);
+    expect(roomJoinEvents).toContainEqual({
+      joinedRoomId: roomId,
+      playerIds: [3],
+      isSpectator: true,
+    });
   });
 });

@@ -91,7 +91,7 @@ const config = {
   bots: {
     enableFillBots: process.env.ENABLE_FILL_BOTS !== 'false',
     botFillCount: getInt('BOT_FILL_COUNT', 2),
-    botMinHumansToFill: getInt('BOT_MIN_HUMANS_TO_FILL', 3),
+    botMinHumansToFill: getInt('BOT_MIN_HUMANS_TO_FILL', 2),
     botThinkDelayMs: getInt('BOT_THINK_DELAY_MS', 1500),
   },
 };

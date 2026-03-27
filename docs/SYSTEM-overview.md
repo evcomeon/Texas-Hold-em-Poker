@@ -159,7 +159,12 @@
 
 说明：
 - 这里是当前系统最容易出现联机问题的地方。
-- 近期已修复为"单实例可并行多桌"，但整体仍是现金桌大厅模型。
+- 当前主实时链路已经恢复可用，支持：
+  - 队列匹配与同级别并行多桌
+  - 指定桌加入 `lobby:join_specific`
+  - `tables:update` 桌面缩略信息广播
+  - 观战、补位、掉线重连
+- `room.players` 现在统一代理到 `engine.players`，房间层和规则层不再维护双份玩家事实来源。
 
 ### 3.5 数据库
 
@@ -171,22 +176,16 @@
 - `users`
 - `game_records`
 - `game_participants`
+- `game_action_logs`
 - `transactions`
 - `user_wallets`
 - `recharge_orders`
 - `api_keys`
 - `wallet_bind_nonces`
 
-外挂/比赛附加表：
-- `tournaments`
-- `tournament_rounds`
-- `tournament_players`
-- `tournament_tables`
-- `tournament_table_players`
-
 说明：
-- 业务数据和调试数据还没有完全分层。
-- 后续建议新增动作日志表，不要继续把排障信息硬塞进现有业务表。
+- 当前主库 schema 已经包含动作日志表 `game_action_logs`，Socket / Lobby / Engine 的关键事件会落库。
+- `clients/openclaw/` 里的比赛脚本仍存在，但主库 schema 目前没有正式落地锦标赛表。
 
 ### 3.6 独立充值服务
 
@@ -229,64 +228,24 @@
 ## 4. 数据库表关系
 
 ```
-┌─────────────────┐       ┌─────────────────┐
-│     users       │       │  user_wallets   │
-├─────────────────┤       ├─────────────────┤
-│ id (PK)         │◄──────│ user_id (FK)    │
-│ username        │       │ address         │
-│ chips_balance   │       │ chain_id        │
-│ created_at      │       │ created_at      │
-└────────┬────────┘       └─────────────────┘
-         │
-         │ 1:N
-         ▼
-┌─────────────────┐       ┌─────────────────┐
-│  transactions   │       │ recharge_orders │
-├─────────────────┤       ├─────────────────┤
-│ id (PK)         │       │ id (PK)         │
-│ user_id (FK)    │◄──────│ user_id (FK)    │
-│ type            │       │ amount          │
-│ amount          │       │ tx_hash         │
-│ balance_after   │       │ status          │
-│ created_at      │       │ created_at      │
-└─────────────────┘       └─────────────────┘
+users
+├── user_wallets
+├── transactions
+├── recharge_orders
+├── api_keys
+├── wallet_bind_nonces
+├── game_participants
+└── game_action_logs
 
-┌─────────────────┐       ┌─────────────────┐
-│  game_records   │       │game_participants│
-├─────────────────┤       ├─────────────────┤
-│ id (PK)         │◄──────│ game_id (FK)    │
-│ room_id         │       │ user_id (FK)    │
-│ hand_number     │       │ final_chips     │
-│ pot             │       │ is_winner       │
-│ created_at      │       │ cards           │
-└─────────────────┘       └─────────────────┘
-
-┌─────────────────┐       ┌─────────────────┐
-│  tournaments    │       │tournament_rounds│
-├─────────────────┤       ├─────────────────┤
-│ id (PK)         │◄──────│ tournament_id   │
-│ name            │       │ round_number    │
-│ status          │       │ status          │
-│ created_at      │       │ started_at      │
-└────────┬────────┘       └────────┬────────┘
-         │                         │
-         │ 1:N                     │ 1:N
-         ▼                         ▼
-┌─────────────────┐       ┌─────────────────┐
-│tournament_players│      │tournament_tables│
-├─────────────────┤       ├─────────────────┤
-│ tournament_id   │       │ round_id        │
-│ user_id         │       │ table_number    │
-│ status          │       │ players         │
-│ final_rank      │       └─────────────────┘
-└─────────────────┘
+game_records
+└── game_participants
 ```
 
 **关系说明：**
-- `users` 是核心表，与 `user_wallets`、`transactions`、`game_participants`、`tournament_players` 都有关联
-- `game_records` 与 `game_participants` 是一对多关系
-- `tournaments` 是锦标赛相关表的根表
-- `recharge_orders` 与 `transactions` 通过 `user_id` 间接关联
+- `users` 是主表，关联钱包、充值、API Key、牌局参与记录和动作日志。
+- `game_records` 与 `game_participants` 是一对多关系。
+- `game_action_logs` 记录房间、手数、阶段、动作与附加元数据，主要用于排障和回放分析。
+- 当前主库 schema 中没有正式创建锦标赛相关表；比赛脚本属于外围工具链，不属于主实时服务的数据模型。
 
 ## 5. 游戏流程图
 
@@ -374,9 +333,9 @@
 
 1. 当前游戏服务器是现金桌模型，不是原生比赛模型。
 2. 单实例现在已经支持同盲注级别并行开多桌。
-3. Socket 事件名曾有过服务端和客户端不一致的问题，修过一次，后续修改要同步检查。
-4. 钱包登录、API Key 鉴权、充值监控都曾有过明显 bug，已做过第一轮修复。
-5. 当前最缺的是压测、日志、恢复能力，不是新功能数量。
+3. `server/routes/game.js` 已重新挂到 `/api`，REST 调试接口与当前 `GameEngine` 签名一致。
+4. `server/socket.js` / `server/lobby.js` / `server/game/engine.js` 的核心审计问题已修完，当前剩余重点是更高层集成回归。
+5. 当前已有结构化 JSON 日志和 `game_action_logs`，但仍缺少指标聚合、压测和状态恢复能力。
 
 ## 7. 最近修复过的关键问题
 
@@ -440,6 +399,22 @@
 - 下一局玩家和观战者正确匹配。
 - 支持11个bot同时测试。
 
+### 7.7 2026-03-26 审计收口
+
+影响文件：
+- `server/game/engine.js`
+- `server/lobby.js`
+- `server/routes/game.js`
+- `docs/API.md`
+- `docs/SYSTEM-overview.md`
+
+结果：
+- heads-up 庄位/盲注顺序已恢复正确。
+- 掉线但未弃牌玩家可以参与摊牌。
+- 边池重新计入已弃牌玩家的既有投入。
+- short all-in 不再错误 reopen betting。
+- REST 调试接口、系统说明文档和 API 文档已同步到当前实现。
+
 ## 8. 关键风险
 
 ### 8.1 内存态过重
@@ -465,8 +440,8 @@
 ### 8.3 日志不足
 
 问题：
-- 缺少结构化日志和动作级日志。
-- 压测后定位 bug 成本高。
+- 已有结构化 JSON 日志和 `game_action_logs`，但仍缺少统一检索、指标面板和告警联动。
+- 压测后定位跨进程或长时间序列问题仍然不够快。
 
 ### 8.4 断线语义不统一
 
@@ -509,14 +484,15 @@
 ### 10.1 当前监控状态
 
 **已有：**
-- 基础日志输出（console.log）
+- `server/lib/logger.js` 输出结构化 JSON 日志
 - 数据库连接状态
+- `game_action_logs` 动作级落库
+- `GET /api/health` 健康检查
 
 **缺失：**
-- 结构化日志
 - 性能指标收集
 - 告警机制
-- 健康检查端点
+- 日志聚合与查询面板
 
 ### 10.2 建议添加的监控指标
 
@@ -547,10 +523,22 @@
 | 数据库延迟 | > 500ms | Warning |
 | 服务无响应 | 健康检查失败 | Critical |
 
-### 10.4 健康检查端点建议
+### 10.4 健康检查端点现状与建议
+
+当前已存在：
 
 ```javascript
-// GET /health
+// GET /api/health
+{
+  "status": "ok",
+  "time": "2026-03-27T10:00:00.000Z"
+}
+```
+
+如果后续要扩展为运维级健康检查，建议升级为：
+
+```javascript
+// GET /api/health
 {
   "status": "ok" | "degraded" | "unhealthy",
   "timestamp": "2024-01-01T00:00:00.000Z",
@@ -578,12 +566,12 @@
 
 优先顺序：
 
-1. 动作级日志
-2. 结构化日志
-3. 100 人在线持续压测脚本
-4. 断线状态机统一
-5. 房间状态快照恢复
-6. Socket / Lobby 拆层
+1. 100 人在线持续压测脚本
+2. 断线状态机统一
+3. 房间状态快照恢复
+4. Socket / Lobby 拆层
+5. route-level / socket-level 集成测试
+6. 日志聚合与监控面板
 7. 比赛系统完善
 8. 充值链路全回归
 
@@ -621,12 +609,14 @@
 服务端：
 ```bash
 cd /Users/evmbp/poker-game/server
+npm install
 node index.js
 ```
 
 前端：
 ```bash
 cd /Users/evmbp/poker-game/client
+npm install
 npx vite
 ```
 
@@ -634,6 +624,13 @@ npx vite
 ```bash
 cd /Users/evmbp/poker-game/clients/openclaw
 JWT_TOKEN=xxx node index.js
+```
+
+或：
+
+```bash
+cd /Users/evmbp/poker-game/clients/openclaw
+API_KEY=pk_xxx node index.js
 ```
 
 锦标赛账号：
@@ -652,6 +649,12 @@ PLAYER_COUNT=16 node run-tournament.js
 ```bash
 cd /Users/evmbp/poker-game/clients/openclaw
 node test-multi-bot.js
+```
+
+回归测试：
+```bash
+cd /Users/evmbp/poker-game
+npm test -- --runInBand
 ```
 
 ## 14. 文档维护规则

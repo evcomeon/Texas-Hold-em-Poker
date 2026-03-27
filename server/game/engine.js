@@ -82,7 +82,15 @@ class GameEngine {
   // ── Initialization ──────────────────────────────────────────
 
   createGame(users) {
-    this.players = users.map((u, i) => ({
+    const uniqueUsers = [];
+    const seenIds = new Set();
+    for (const user of users) {
+      if (seenIds.has(user.id)) continue;
+      seenIds.add(user.id);
+      uniqueUsers.push(user);
+    }
+
+    this.players = uniqueUsers.map((u, i) => ({
       id: u.id,
       name: u.name || u.username,
       picture: u.picture,

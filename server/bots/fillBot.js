@@ -69,15 +69,19 @@ function createFillBots(count, stakeConfig) {
 
 /**
  * 创建 getFillBotsProvider 回调
- * humanCount < botMinHumansToFill 时返回 fillCount 个 Bot（固定数量）
+ * 仅补到目标最小人数，避免出现“1 个真人 + 2 个 Bot”这种
+ * 真人一弃牌就只剩 Bot 自己互打的场景。
  */
 function createFillBotsProvider(botConfig = {}) {
   const fillCount = botConfig.botFillCount ?? 2;
-  const minHumans = botConfig.botMinHumansToFill ?? 3;
+  const minHumans = botConfig.botMinHumansToFill ?? 2;
 
   return (humanCount, stakeConfig) => {
     if (humanCount >= minHumans) return [];
-    return createFillBots(fillCount, stakeConfig);
+    const neededBots = Math.max(0, minHumans - humanCount);
+    const botsToAdd = Math.min(fillCount, neededBots);
+    if (botsToAdd <= 0) return [];
+    return createFillBots(botsToAdd, stakeConfig);
   };
 }
 

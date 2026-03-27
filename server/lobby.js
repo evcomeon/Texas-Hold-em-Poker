@@ -57,6 +57,7 @@ class LobbyManager {
   constructor() {
     this.connectedUsers = new Map(); // socketId -> { user, socket, roomId, isSpectator }
     this.waitingQueue = new Map(); // stakeLevel -> Array of user objects
+    this.pendingQueueUsers = new Set(); // userId -> queue join in-flight
     this.activeGames = new Map(); // roomId -> { engine, players: [], spectators: [], maxPlayers: number, stakeLevel }
     this.tables = new Map(); // roomId -> TableInfo
     this.queueCheckTimers = new Map(); // stakeLevel -> timeout id
@@ -102,6 +103,30 @@ class LobbyManager {
     }
     tableInfo.setSpectatorCount(room.spectators.length);
     tableInfo.setPhase(room.engine.phase);
+  }
+
+  _syncTableInfo(roomId) {
+    this._updateTableInfo(roomId);
+    this.emitTablesUpdate();
+  }
+
+  _findUserEntriesById(userId) {
+    const matches = [];
+    for (const [socketId, data] of this.connectedUsers.entries()) {
+      if (data.user.id === userId) {
+        matches.push([socketId, data]);
+      }
+    }
+    return matches;
+  }
+
+  _isUserQueued(userId) {
+    for (const queue of this.waitingQueue.values()) {
+      if (queue.some((queuedUser) => queuedUser.id === userId)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -194,62 +219,73 @@ class LobbyManager {
       queueLength: queue.length,
       elapsedMs: Date.now() - startTime,
     });
-    if (queue.find(u => u.id === user.id)) {
+    if (this.pendingQueueUsers.has(user.id) || this._isUserQueued(user.id)) {
       logger.warn('lobby.already_queued', { userId: user.id, stakeLevel });
-      return false;
-    }
-    
-    // 检查用户是否已经在某个房间（断开重连的情况）
-    const findStart = Date.now();
-    const existingData = this._findUserDataById(user.id);
-    logger.info('lobby.find_user_data', { userId: user.id, elapsedMs: Date.now() - findStart });
-    
-    if (existingData && existingData.roomId) {
-      // 用户之前在某个房间，先离开那个房间
-      this._leaveRoom(user.id, existingData.roomId);
-    }
-
-    // 在进入队列前同步最新筹码，避免余额不足的用户抢先进队后又被转成观战者
-    const dbStart = Date.now();
-    try {
-      const dbUser = await UserModel.findById(user.id);
-      if (dbUser) {
-        user.chips = dbUser.chips_balance;
-        user.picture = dbUser.avatar_url || user.picture;
-      }
-      logger.info('lobby.db_fetch_chips', { userId: user.id, elapsedMs: Date.now() - dbStart });
-    } catch (e) {
-      logger.error('lobby.fetch_chips_before_queue_failed', { userId: user.id, error: e, elapsedMs: Date.now() - dbStart });
-    }
-
-    const minRequiredChips = this.STAKE_LEVELS[stakeLevel].bigBlind;
-    const currentChips = user.chips || 0;
-    if (currentChips < minRequiredChips) {
       return {
-        error: '筹码不足，无法进入该级别牌桌',
-        currentChips,
-        requiredChips: minRequiredChips,
-        stakeLevel
+        error: '该账号已在匹配队列中，请勿重复点击开始匹配',
+        stakeLevel,
       };
     }
-    
-    // 先同步地将用户添加到队列（占位）
-    queue.push(user);
-    logger.info('lobby.joined_queue', {
-      userId: user.id,
-      username: user.username,
-      stakeLevel,
-      queueLength: queue.length,
-      chips: user.chips || 0,
-      totalElapsedMs: Date.now() - startTime,
-    });
-    
-    // Attach socket
-    this.connectedUsers.set(socket.id, { user, socket, roomId: null, isSpectator: false, stakeLevel });
-    
-    this._scheduleQueueCheck(roomIdRefCb, stakeLevel);
-    
-    return true;
+
+    this.pendingQueueUsers.add(user.id);
+    try {
+      // 检查是否已经在某个房间中，避免同账号重复进桌把自己复制到牌局里
+      const findStart = Date.now();
+      const existingEntries = this._findUserEntriesById(user.id).filter(([socketId]) => socketId !== socket.id);
+      const activeRoomEntry = existingEntries.find(([, data]) => data.roomId);
+      logger.info('lobby.find_user_data', { userId: user.id, elapsedMs: Date.now() - findStart });
+
+      if (activeRoomEntry) {
+        return {
+          error: '该账号已在牌桌中，请先返回原牌桌或断开其他会话',
+          roomId: activeRoomEntry[1].roomId,
+        };
+      }
+
+      // 在进入队列前同步最新筹码，避免余额不足的用户抢先进队后又被转成观战者
+      const dbStart = Date.now();
+      try {
+        const dbUser = await UserModel.findById(user.id);
+        if (dbUser) {
+          user.chips = dbUser.chips_balance;
+          user.picture = dbUser.avatar_url || user.picture;
+        }
+        logger.info('lobby.db_fetch_chips', { userId: user.id, elapsedMs: Date.now() - dbStart });
+      } catch (e) {
+        logger.error('lobby.fetch_chips_before_queue_failed', { userId: user.id, error: e, elapsedMs: Date.now() - dbStart });
+      }
+
+      const minRequiredChips = this.STAKE_LEVELS[stakeLevel].bigBlind;
+      const currentChips = user.chips || 0;
+      if (currentChips < minRequiredChips) {
+        return {
+          error: '筹码不足，无法进入该级别牌桌',
+          currentChips,
+          requiredChips: minRequiredChips,
+          stakeLevel
+        };
+      }
+      
+      // 先同步地将用户添加到队列（占位）
+      queue.push(user);
+      logger.info('lobby.joined_queue', {
+        userId: user.id,
+        username: user.username,
+        stakeLevel,
+        queueLength: queue.length,
+        chips: user.chips || 0,
+        totalElapsedMs: Date.now() - startTime,
+      });
+      
+      // Attach socket
+      this.connectedUsers.set(socket.id, { user, socket, roomId: null, isSpectator: false, stakeLevel });
+      
+      this._scheduleQueueCheck(roomIdRefCb, stakeLevel);
+      
+      return true;
+    } finally {
+      this.pendingQueueUsers.delete(user.id);
+    }
   }
 
   _scheduleQueueCheck(roomIdRefCb, stakeLevel) {
@@ -384,7 +420,7 @@ class LobbyManager {
 
   _checkQueue(roomIdRefCb, stakeLevel = 'medium') {
     const checkStart = Date.now();
-    const queue = this.waitingQueue.get(stakeLevel);
+    let queue = this.waitingQueue.get(stakeLevel);
     const stakeConfig = this.STAKE_LEVELS[stakeLevel];
     
     logger.info('lobby.check_queue', {
@@ -392,9 +428,20 @@ class LobbyManager {
       queueLength: queue.length,
       activeRoomCount: Array.from(this.activeGames.values()).filter((room) => room.stakeLevel === stakeLevel).length,
     });
+
+    if (queue.length > 1) {
+      const seenUserIds = new Set();
+      const dedupedQueue = [];
+      for (const queuedUser of queue) {
+        if (seenUserIds.has(queuedUser.id)) continue;
+        seenUserIds.add(queuedUser.id);
+        dedupedQueue.push(queuedUser);
+      }
+      this.waitingQueue.set(stakeLevel, dedupedQueue);
+      queue = dedupedQueue;
+    }
     
     // 1. 先把用户填进还没开打或已结束、但仍有玩家空位的同级别桌子。
-    let fillCount = 0;
     while (queue.length > 0) {
       const openRoomEntry = this._findOpenPlayerRoom(stakeLevel);
       if (!openRoomEntry) break;
@@ -403,7 +450,6 @@ class LobbyManager {
       const player = queue.shift();
       if (!player) break;
       
-      fillCount++;
       const fillStart = Date.now();
 
       const added = room.engine.addPlayer(player);
@@ -424,6 +470,8 @@ class LobbyManager {
         roomIdRefCb(roomId, [player], room.engine, false, true);
       }
 
+      this._syncTableInfo(roomId);
+
       if (room.engine.phase !== 'WAITING') {
         this._broadcastToRoom(roomId, room);
       }
@@ -431,9 +479,21 @@ class LobbyManager {
       logger.info('lobby.fill_room', { roomId, playerId: player.id, elapsedMs: Date.now() - fillStart });
     }
 
-    // 2. 只要队列里有人，就持续创建新桌（不足时由可选 fillBotsProvider 补足）
-    let createCount = 0;
-    while (queue.length >= 1) {
+    // 2. 当人数还不够开新桌时，优先挂到现有进行中的同级别桌子观战，
+    // 这样后来的真人不会再被立刻拆去新开的 Bot 房。
+    while (queue.length > 0 && queue.length < this.MIN_PLAYERS) {
+      const spectatorRoomEntry = this._findSpectatorRoom(stakeLevel);
+      if (!spectatorRoomEntry) break;
+
+      const [roomId, room] = spectatorRoomEntry;
+      const spectator = queue.shift();
+      if (!spectator) break;
+
+      this._assignSpectatorToRoom(roomId, room, spectator, roomIdRefCb);
+    }
+
+    // 3. 有足够真人时优先开真人桌；只有没有可挂观战的房间时，才会为零散真人补 Bot 开桌。
+    while (queue.length >= this.MIN_PLAYERS || (queue.length > 0 && !this._findSpectatorRoom(stakeLevel))) {
       const createStart = Date.now();
       const humanCount = Math.min(queue.length, this.MAX_PLAYERS);
       const players = queue.splice(0, humanCount);
@@ -447,7 +507,6 @@ class LobbyManager {
       }
 
       const roomId = this._createRoomWithPlayers(allPlayers, stakeLevel, stakeConfig, roomIdRefCb);
-      createCount++;
       logger.info('lobby.room_created', {
         roomId,
         stakeLevel,
@@ -458,7 +517,7 @@ class LobbyManager {
       });
     }
 
-    // 3. 剩下不足开新桌的零散用户，如果有进行中的同级别桌子，则进入观战等待下一手补位。
+    // 4. 剩下不足开新桌的零散用户，如果有进行中的同级别桌子，则进入观战等待下一手补位。
     while (queue.length > 0) {
       const spectatorRoomEntry = this._findSpectatorRoom(stakeLevel);
       if (!spectatorRoomEntry) {
@@ -474,21 +533,30 @@ class LobbyManager {
       const spectator = queue.shift();
       if (!spectator) break;
 
+      this._assignSpectatorToRoom(roomId, room, spectator, roomIdRefCb);
+    }
+  }
+
+  _assignSpectatorToRoom(roomId, room, spectator, roomIdRefCb) {
+    if (!room.spectators.includes(spectator.id)) {
       room.spectators.push(spectator.id);
       room.engine.addSpectator(spectator.id);
+    }
 
-      for (const [sId, data] of this.connectedUsers.entries()) {
-        if (data.user.id === spectator.id) {
-          data.roomId = roomId;
-          data.isSpectator = true;
-          break;
-        }
-      }
-
-      if (roomIdRefCb) {
-        roomIdRefCb(roomId, [spectator], room.engine, true, true);
+    for (const [sId, data] of this.connectedUsers.entries()) {
+      if (data.user.id === spectator.id) {
+        data.roomId = roomId;
+        data.isSpectator = true;
+        break;
       }
     }
+
+    if (roomIdRefCb) {
+      roomIdRefCb(roomId, [spectator], room.engine, true, true);
+    }
+
+    this._syncTableInfo(roomId);
+    this._broadcastToRoom(roomId, room);
   }
 
   _findOpenPlayerRoom(stakeLevel) {
