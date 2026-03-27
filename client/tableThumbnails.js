@@ -57,11 +57,7 @@ function renderTables(tables) {
       e.stopPropagation();
       const tableId = btn.closest('.table-card').dataset.tableId;
       // Emit via global socket defined in main.js
-      if (window.socket) {
-        window.socket.emit('lobby:join_specific', { tableId });
-      }
+      socket.emit('lobby:join_specific', { tableId });
     });
   });
 }
-
-export { renderTables };

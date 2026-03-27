@@ -6,7 +6,6 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const gameRoutes = require('./routes/game');
 const logger = require('./lib/logger');
 const config = require('./config');
 
@@ -32,7 +31,7 @@ app.use('/api/wallet', require('./routes/wallet'));
 app.use('/api/recharge', require('./routes/recharge'));
 app.use('/api/leaderboard', require('./routes/leaderboard'));
 app.use('/api/keys', require('./routes/apiKeys').router);
-app.use('/api', gameRoutes);
+app.use('/api', require('./routes/game'));
 
 // Health check
 app.get('/api/health', (req, res) => {

@@ -7,12 +7,20 @@ const { EventEmitter } = require('events');
 const uuidv4 = crypto.randomUUID ? () => crypto.randomUUID() : () => Math.random().toString(36).substring(2) + Date.now().toString(36);
 const GameEngine = require('./game/engine');
 const UserModel = require('./models/user');
-const GameActionLogModel = require('./models/gameActionLog');
 const { TableInfo } = require('./models/table');
 const logger = require('./lib/logger');
 const config = require('./config');
 
+// Safe-import: GameActionLogModel may not be available in test
+let GameActionLogModel = null;
+try {
+  GameActionLogModel = require('./models/gameActionLog');
+} catch (e) {
+  // model unavailable — persistGameActionLog will silently skip
+}
+
 function persistGameActionLog(payload) {
+  if (!GameActionLogModel) return;
   GameActionLogModel.create(payload).catch((error) => {
     logger.error('game_action_log.persist_failed', {
       roomId: payload.roomId,
@@ -29,7 +37,6 @@ class LobbyManager {
     this.events.emit('room:maybeDelete', { roomId, reason });
   }
 
-  // 真正执行房间删除的逻辑
   _handleRoomDeletion(roomId, reason) {
     const room = this.activeGames.get(roomId);
     if (!room) return;
@@ -40,6 +47,11 @@ class LobbyManager {
     logger.info('lobby.room_removed', { roomId, reason });
     // 广播最新的桌子列表，使前端 UI 立即更新
     this.emitTablesUpdate();
+  }
+
+  emitTablesUpdate() {
+    if (!this.io) return;
+    this.io.emit('tables:update', Array.from(this.tables.values()));
   }
 
   constructor() {
@@ -58,53 +70,17 @@ class LobbyManager {
     // Config
     this.MIN_PLAYERS = config.game.minPlayers;  // 最少玩家数
     this.MAX_PLAYERS = config.game.maxPlayers;  // 最多玩家数
-    
+
     // 盲注级别
     this.STAKE_LEVELS = config.game.stakeLevels;
-    
-    // 初始化等待队列
-    Object.keys(this.STAKE_LEVELS).forEach(level => {
+
+    // Initialize a queue array for each stake level
+    for (const level of Object.keys(this.STAKE_LEVELS)) {
       this.waitingQueue.set(level, []);
-    });
+    }
 
     // 可选注入：Bot 插件（不 require bots 模块，由上层注入）
     this.getFillBotsProvider = null;
-    this.getPlayerChips = null;
-    this.broadcastDelegate = null; // 若设置，_broadcastToRoom 委托给此函数
-  }
-
-  setFillBotsProvider(fn) {
-    this.getFillBotsProvider = fn;
-  }
-
-  setGetPlayerChips(fn) {
-    this.getPlayerChips = fn;
-  }
-
-  setBroadcastDelegate(fn) {
-    this.broadcastDelegate = fn;
-  }
-
-  setIo(io) {
-    this.io = io;
-  }
-
-  getStakeLevels() {
-    return this.STAKE_LEVELS;
-  }
-
-  getTables() {
-    const tables = [];
-    for (const [roomId, tableInfo] of this.tables.entries()) {
-      tables.push(tableInfo.toJSON());
-    }
-    return tables;
-  }
-
-  emitTablesUpdate() {
-    if (this.io) {
-      this.io.emit('table:update', this.getTables());
-    }
   }
 
   _updateTableInfo(roomId) {
@@ -121,17 +97,56 @@ class LobbyManager {
     }
 
     tableInfo.players = [];
-    for (const p of room.engine.players) {
+    for (const p of room.engine.players.filter((player) => player.connectionState !== 'removed')) {
       tableInfo.addPlayer(p);
     }
     tableInfo.setSpectatorCount(room.spectators.length);
     tableInfo.setPhase(room.engine.phase);
   }
 
+  /**
+   * Remove a user from all waiting queues.
+   * socket.js calls this with userId (not socketId).
+   */
+  leaveQueue(userId) {
+    // Support being called with either a userId directly
+    // or a socketId (legacy). Try userId-based removal first.
+    for (const [level, queue] of this.waitingQueue.entries()) {
+      this.waitingQueue.set(level, queue.filter(u => u.id !== userId));
+    }
+    // Also try socketId-based removal in case caller passes socketId
+    const data = this.connectedUsers.get(userId);
+    if (data) {
+      for (const [level, queue] of this.waitingQueue.entries()) {
+        this.waitingQueue.set(level, queue.filter(u => u.id !== data.user.id));
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Returns the STAKE_LEVELS object (keyed by level name).
+   * socket.js indexes the result with `[room.stakeLevel || 'medium']`.
+   */
+  getStakeLevels() {
+    return this.STAKE_LEVELS;
+  }
+
+  setBroadcastDelegate(delegate) {
+    this.broadcastDelegate = delegate;
+  }
+
+  setFillBotsProvider(provider) {
+    this.getFillBotsProvider = provider;
+  }
+
+  setGetPlayerChips(provider) {
+    this.getPlayerChips = provider;
+  }
+
   onDisconnect(socketId) {
     const data = this.connectedUsers.get(socketId);
-    if (!data) return;
-
+    if (!data) return null;
     this.connectedUsers.delete(socketId);
     
     // Remove from all waiting queues
@@ -148,7 +163,7 @@ class LobbyManager {
         } else {
           room.engine.handleDisconnect(data.user.id);
 
-          const connectedPlayers = room.players.filter((p) => p.connectionState === 'online');
+          const connectedPlayers = room.engine.players.filter((p) => p.connectionState === 'online');
           if (connectedPlayers.length <= 1 && room.engine.phase !== 'WAITING' && room.engine.phase !== 'FINISHED') {
             room.engine.phase = 'FINISHED';
             this._broadcastToRoom(data.roomId, room);
@@ -262,125 +277,25 @@ class LobbyManager {
   _leaveRoom(userId, roomId) {
     const room = this.activeGames.get(roomId);
     if (!room) return;
-    
-    // 从玩家列表中移除
-    room.players = room.players.filter(p => p.id !== userId);
-    room.engine.removePlayer(userId);
-    
-    // 从观战者列表中移除
-    room.spectators = room.spectators.filter(id => id !== userId);
-    
-    // 更新 connectedUsers 中该用户的 roomId
-    for (const [sId, data] of this.connectedUsers.entries()) {
-      if (data.user.id === userId) {
-        data.roomId = null;
-        data.isSpectator = false;
-      }
-    }
-    
-    // 如果房间空了，删除房间
-    if (room.players.length === 0 && room.spectators.length === 0) {
-      this.activeGames.delete(roomId);
-      // console.log(`[Lobby] 房间 ${roomId} 已删除`);
-    }
-  }
 
-  leaveQueue(userId) {
-    for (const [level, queue] of this.waitingQueue.entries()) {
-      this.waitingQueue.set(level, queue.filter(u => u.id !== userId));
-    }
-  }
-
-  async joinSpecificTable(user, socket, tableId, roomIdRefCb) {
-    const room = this.activeGames.get(tableId);
-    
-    if (!room) {
-      return { success: false, error: 'table_not_found' };
-    }
-
-    const tableInfo = this.tables.get(tableId);
-    if (tableInfo && tableInfo.isFull()) {
-      const suggestedRoomId = await this.joinRandom(user, socket, roomIdRefCb);
-      return { 
-        success: false, 
-        error: 'full', 
-        suggestedRoomId 
-      };
-    }
-
-    const existingPlayer = room.engine.players.find(p => p.id === user.id);
-    if (existingPlayer) {
-      return { success: false, error: 'already_in_table' };
-    }
-
-    const playerChips = user.chips || 0;
-    const playerName = user.name || user.username;
-
-    if (playerChips < room.engine.bigBlind) {
-      // insufficient chips – reject join
-      return { success: false, error: 'insufficient_chips' };
-    }
-
-    room.engine.addPlayer({
-          connectionState: 'waiting',
-      id: user.id,
-      name: playerName,
-      picture: user.picture,
-      chips: playerChips
-    });
-
-    for (const [sId, data] of this.connectedUsers.entries()) {
-      if (data.user.id === user.id) {
-        data.roomId = tableId;
-        data.isSpectator = false;
-        break;
+    if (room.spectators.includes(userId)) {
+      room.spectators = room.spectators.filter(id => id !== userId);
+      room.engine.removeSpectator(userId);
+    } else {
+      room.engine.removePlayer(userId);
+      if (room.engine.phase === 'WAITING' || room.engine.phase === 'FINISHED') {
+        room.engine.cleanupRemovedPlayers();
       }
     }
 
-    if (roomIdRefCb) {
-      roomIdRefCb(tableId, room.engine.players, room.engine, false, false);
+    const hasPlayers = room.engine.players.some((p) => p.connectionState !== 'removed');
+    const hasSpectators = room.spectators && room.spectators.length > 0;
+    if (!hasPlayers && !hasSpectators) {
+      this._maybeDeleteRoom(roomId, 'empty');
+    } else {
+      this._updateTableInfo(roomId);
+      this.emitTablesUpdate();
     }
-
-    this._updateTableInfo(tableId);
-    this.emitTablesUpdate();
-    this._broadcastToRoom(tableId, room);
-
-    logger.info('lobby.join_specific_table', {
-      tableId,
-      userId: user.id,
-      playerName,
-      playerCount: room.engine.players.length
-    });
-
-    return { success: true, roomId: tableId };
-  }
-
-  async joinRandom(user, socket, roomIdRefCb, stakeLevel = 'medium') {
-    let availableTables = [];
-    
-    for (const [roomId, tableInfo] of this.tables.entries()) {
-      if (!tableInfo.isFull() && tableInfo.stakeLevel === stakeLevel) {
-        availableTables.push({
-          roomId,
-          playerCount: tableInfo.getPlayerCount(),
-          createdAt: tableInfo.createdAt
-        });
-      }
-    }
-
-    availableTables.sort((a, b) => {
-      if (a.playerCount !== b.playerCount) {
-        return b.playerCount - a.playerCount;
-      }
-      return a.createdAt - b.createdAt;
-    });
-
-    if (availableTables.length > 0) {
-      const targetRoomId = availableTables[0].roomId;
-      return this.joinSpecificTable(user, socket, targetRoomId, roomIdRefCb);
-    }
-
-    return this.joinQueue(user, socket, roomIdRefCb, stakeLevel);
   }
 
   /**
@@ -422,11 +337,12 @@ class LobbyManager {
 
       // 标记为已移除（而非掉线）
       engine.markPlayerRemoved(userId, 'left');
+      if (engine.phase === 'WAITING' || engine.phase === 'FINISHED') {
+        engine.cleanupRemovedPlayers();
+      }
 
       // 从 readyForNext 中移除
       engine.readyForNext.delete(userId);
-
-      logger.info('lobby.player_left_game', { roomId, userId, userName, phase: engine.phase });
 
       // 检查剩余在线玩家
       const connectedPlayers = engine.players.filter(
@@ -445,9 +361,10 @@ class LobbyManager {
     data.isSpectator = false;
 
     // 清理：房间空了就删除（使用统一方法）
-    this._maybeDeleteRoom(roomId);
-    // 若未删除则更新桌子信息
-    const remainingPlayers = room.players.filter(p => p.connectionState !== 'removed');
+    const remainingPlayers = room.engine.players.filter(p => p.connectionState !== 'removed');
+    if (remainingPlayers.length === 0 && room.spectators.length === 0) {
+      this._maybeDeleteRoom(roomId);
+    }
     if (remainingPlayers.length > 0 || room.spectators.length > 0) {
       this._updateTableInfo(roomId);
     }
@@ -489,8 +406,11 @@ class LobbyManager {
       fillCount++;
       const fillStart = Date.now();
 
-      room.players.push(player);
-      room.engine.addPlayer(player);
+      const added = room.engine.addPlayer(player);
+      if (!added) {
+        queue.unshift(player);
+        break;
+      }
 
       for (const [sId, data] of this.connectedUsers.entries()) {
         if (data.user.id === player.id) {
@@ -575,8 +495,11 @@ class LobbyManager {
     for (const entry of this.activeGames.entries()) {
       const [, room] = entry;
       const sameLevel = room.stakeLevel === stakeLevel;
-      const canSeatPlayers = room.players.length < this.MAX_PLAYERS;
       const acceptsPlayers = room.engine.phase === 'WAITING' || room.engine.phase === 'FINISHED';
+      if (acceptsPlayers) {
+        room.engine.cleanupRemovedPlayers();
+      }
+      const canSeatPlayers = room.players.length < this.MAX_PLAYERS;
 
       if (sameLevel && canSeatPlayers && acceptsPlayers) {
         return entry;
@@ -589,7 +512,7 @@ class LobbyManager {
     for (const entry of this.activeGames.entries()) {
       const [, room] = entry;
       const sameLevel = room.stakeLevel === stakeLevel;
-      const hasSpaceEventually = room.players.length < this.MAX_PLAYERS;
+      const hasSpaceEventually = room.players.filter((player) => player.connectionState !== 'removed').length < this.MAX_PLAYERS;
       const inProgress = room.engine.phase !== 'WAITING' && room.engine.phase !== 'FINISHED';
 
       if (sameLevel && hasSpaceEventually && inProgress) {
@@ -648,13 +571,20 @@ class LobbyManager {
       });
     });
 
-    this.activeGames.set(roomId, {
+    const room = {
       engine,
-      players,
       spectators: [],
       maxPlayers: this.MAX_PLAYERS,
       stakeLevel
+    };
+    Object.defineProperty(room, 'players', {
+      enumerable: true,
+      get: () => engine.players,
+      set: (players) => {
+        engine.players = players;
+      },
     });
+    this.activeGames.set(roomId, room);
 
     players.forEach((p) => {
       for (const [sId, data] of this.connectedUsers.entries()) {
@@ -673,7 +603,6 @@ class LobbyManager {
     this._updateTableInfo(roomId);
     this.emitTablesUpdate();
 
-    const room = this.activeGames.get(roomId);
     this._broadcastToRoom(roomId, room);
 
     return roomId;
@@ -736,7 +665,7 @@ class LobbyManager {
       return { restored: false, reason: 'player_not_found' };
     }
 
-    const player = room.players.find((p) => p.id === user.id);
+    const player = room.engine.players.find((p) => p.id === user.id);
     if (player) {
       player.disconnected = false;
       player.connectionState = 'online';
@@ -838,15 +767,21 @@ class LobbyManager {
         
         // 检查筹码是否足够
         if (specUser.chips >= minChips) {
-          room.players.push(specUser);
-          room.engine.addPlayer(specUser);
-          this._log(`观战者 ${specId} 转为玩家`);
+          const added = room.engine.addPlayer(specUser);
+          if (added) {
+            this._log(`观战者 ${specId} 转为玩家`);
+          } else {
+            stillSpectators.push(specId);
+            room.engine.addSpectator(specId);
+          }
           
           // 更新状态
-          for (const [sId, data] of this.connectedUsers.entries()) {
-            if (data.user.id === specId) {
-              data.isSpectator = false;
-              break;
+          if (added) {
+            for (const [sId, data] of this.connectedUsers.entries()) {
+              if (data.user.id === specId) {
+                data.isSpectator = false;
+                break;
+              }
             }
           }
         } else {

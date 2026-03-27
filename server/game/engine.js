@@ -35,6 +35,7 @@ class GameEngine {
     this.currentHandLog = [];
     this.lastAction = null;
     this.roundInitiator = -1;
+    this.actedSinceLastFullRaise = new Set();
     this.readyForNext = new Set();
     this.maxPlayers = 8;
     
@@ -101,6 +102,7 @@ class GameEngine {
     this.handNumber = 0;
     this.history = [];
     this.phase = 'WAITING'; // 等待更多玩家加入
+    this.actedSinceLastFullRaise.clear();
     this._log("等待玩家加入...");
     
     // 如果已经有足够的玩家，自动开始游戏
@@ -217,6 +219,27 @@ class GameEngine {
   _isPlayerConnected(player) {
     return player.connectionState === ConnectionState.ONLINE;
   }
+
+  _markPlayerActed(userId, reopenedBetting = false) {
+    if (reopenedBetting) {
+      this.actedSinceLastFullRaise.clear();
+    }
+    this.actedSinceLastFullRaise.add(userId);
+  }
+
+  _canPlayerRaise(playerIndex) {
+    const player = this.players[playerIndex];
+    if (!player || !this._canPlayerAct(player) || player.folded || player.allIn) {
+      return false;
+    }
+
+    const callAmount = Math.max(0, this.currentBet - player.bet);
+    if (player.chips <= callAmount) {
+      return false;
+    }
+
+    return !this.actedSinceLastFullRaise.has(player.id);
+  }
   
   // ── Add Spectator ───────────────────────────────────────────
   
@@ -237,8 +260,19 @@ class GameEngine {
     this.currentHandLog = [];
     this.readyForNext.clear();
     this.clearReadyTimer();
+    this.clearTurnTimer();
     
     this.cleanupRemovedPlayers();
+
+    this.deck = [];
+    this.communityCards = [];
+    this.pot = 0;
+    this.sidePots = [];
+    this.currentBet = 0;
+    this.minRaise = this.bigBlind;
+    this.lastAction = null;
+    this.roundInitiator = -1;
+    this.actedSinceLastFullRaise.clear();
 
     // Reset player states
     for (const p of this.players) {
@@ -253,8 +287,8 @@ class GameEngine {
       }
     }
 
-    // Check if enough active players
-    const activePlayers = this.players.filter(p => p.isActive && p.connectionState !== ConnectionState.REMOVED);
+    // Check if enough active players (DISCONNECTED players must NOT count)
+    const activePlayers = this.players.filter(p => p.isActive && p.connectionState === ConnectionState.ONLINE);
     if (activePlayers.length < 2) {
       this.phase = 'WAITING';
       this._log("等待更多玩家加入...");
@@ -267,24 +301,28 @@ class GameEngine {
 
     // Shuffle deck
     this.deck = shuffle(createDeck());
-    this.communityCards = [];
-    this.pot = 0;
-    this.sidePots = []; // FIX: 重置边池
-    this.currentBet = 0;
-    this.lastAction = null;
 
-    // Deal hole cards
+    // Deal hole cards (only to connected active players)
     for (let round = 0; round < 2; round++) {
       for (const p of this.players) {
-        if (p.isActive) {
+        if (p.isActive && p.connectionState === ConnectionState.ONLINE) {
           p.holeCards.push(this.deck.pop());
         }
       }
     }
 
-    // Post blinds
-    const sbIndex = this._nextActivePlayer(this.dealerIndex);
-    const bbIndex = this._nextActivePlayer(sbIndex);
+    // Heads-up special case: dealer is small blind, non-dealer is big blind
+    const isHeadsUp = activePlayers.length === 2;
+    let sbIndex, bbIndex;
+
+    if (isHeadsUp) {
+      // In heads-up, dealer posts small blind, opponent posts big blind
+      sbIndex = this.dealerIndex;
+      bbIndex = this._nextActivePlayer(this.dealerIndex);
+    } else {
+      sbIndex = this._nextActivePlayer(this.dealerIndex);
+      bbIndex = this._nextActivePlayer(sbIndex);
+    }
 
     this._postBlind(sbIndex, this.smallBlind);
     this._postBlind(bbIndex, this.bigBlind);
@@ -292,9 +330,15 @@ class GameEngine {
     this.currentBet = this.bigBlind;
     this.minRaise = this.bigBlind;
     this.phase = 'PRE_FLOP';
+    this.actedSinceLastFullRaise.clear(); // blinds are forced bets, not voluntary actions
 
-    // First to act is after BB
-    this.currentPlayerIndex = this._nextActivePlayer(bbIndex);
+    if (isHeadsUp) {
+      // In heads-up, small blind (dealer) acts first pre-flop
+      this.currentPlayerIndex = sbIndex;
+    } else {
+      // First to act is after BB
+      this.currentPlayerIndex = this._nextActivePlayer(bbIndex);
+    }
     this.roundInitiator = this.currentPlayerIndex;
 
     this._log(`=== 第 ${this.handNumber} 手 ===`);
@@ -388,8 +432,17 @@ class GameEngine {
         },
       });
       
-      if (!p.folded && this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED' && this.phase !== 'WAITING') {
-         this.performAction(userId, 'fold');
+      // Only auto-fold if: (1) it's this player's turn to act, (2) player is not all-in,
+      // (3) game is in a betting phase. All-in or non-acting players keep their hand.
+      if (!p.folded && !p.allIn &&
+          this.phase !== 'SHOWDOWN' && this.phase !== 'FINISHED' && this.phase !== 'WAITING') {
+        // Only fold if it's currently this player's turn
+        const currentPlayer = this.players[this.currentPlayerIndex];
+        if (currentPlayer && currentPlayer.id === userId) {
+          this.performAction(userId, 'fold');
+        }
+        // If not their turn, they stay in the hand as disconnected.
+        // When their turn comes, _handleTimeout will auto-fold them.
       }
       
       this.startDisconnectTimer(userId);
@@ -480,6 +533,7 @@ class GameEngine {
         player.folded = true;
         this._log(`${player.name} 弃牌`);
         this.lastAction = { player: player.name, action: '弃牌' };
+        this._markPlayerActed(userId);
         break;
 
       case 'check':
@@ -488,6 +542,7 @@ class GameEngine {
         }
         this._log(`${player.name} 过牌`);
         this.lastAction = { player: player.name, action: '过牌' };
+        this._markPlayerActed(userId);
         break;
 
       case 'call': {
@@ -499,41 +554,78 @@ class GameEngine {
         if (player.chips === 0) player.allIn = true;
         this._log(`${player.name} 跟注 ${callAmount}`);
         this.lastAction = { player: player.name, action: '跟注', amount: callAmount };
+        this._markPlayerActed(userId);
         break;
       }
 
       case 'raise': {
-        const raiseTotal = Math.max(amount, this.currentBet + this.minRaise);
+        if (!this._canPlayerRaise(playerIndex)) {
+          return { error: '当前只能跟注或弃牌（不足最小加注的全下不重开下注）' };
+        }
+        const fullRaiseTarget = this.currentBet + this.minRaise;
+        // If player can afford a full raise, enforce minimum
+        if (amount < fullRaiseTarget && player.chips + player.bet >= fullRaiseTarget) {
+          return { error: `raise must be at least ${fullRaiseTarget}` };
+        }
+        const raiseTotal = Math.max(amount, fullRaiseTarget);
         const raiseAmount = Math.min(raiseTotal - player.bet, player.chips);
         player.chips -= raiseAmount;
         player.bet += raiseAmount;
         player.totalBet += raiseAmount;
         this.pot += raiseAmount;
-        if (player.bet > this.currentBet) {
-          this.minRaise = player.bet - this.currentBet;
+
+        const raiseIncrement = player.bet - this.currentBet;
+        let reopenedBetting = false;
+
+        if (raiseIncrement >= this.minRaise) {
+          // Full raise: update currentBet, minRaise, and reopen betting
+          this.minRaise = raiseIncrement;
           this.currentBet = player.bet;
           this.roundInitiator = playerIndex;
+          reopenedBetting = true;
+        } else if (player.chips === 0 && player.bet > this.currentBet) {
+          // Short all-in raise: update currentBet but do NOT reopen betting
+          // and do NOT change minRaise
+          this.currentBet = player.bet;
+          // roundInitiator is NOT reset — no reopen
         }
         if (player.chips === 0) player.allIn = true;
         this._log(`${player.name} 加注到 ${player.bet}`);
         this.lastAction = { player: player.name, action: '加注', amount: player.bet };
+        this._markPlayerActed(userId, reopenedBetting);
         break;
       }
 
       case 'allin': {
+        if (player.bet + player.chips > this.currentBet && !this._canPlayerRaise(playerIndex)) {
+          return { error: '当前只能跟注或弃牌（不足最小加注的全下不重开下注）' };
+        }
         const allInAmount = player.chips;
         player.chips = 0;
         player.bet += allInAmount;
         player.totalBet += allInAmount;
         this.pot += allInAmount;
         player.allIn = true;
+        let reopenedBetting = false;
+
         if (player.bet > this.currentBet) {
-          this.minRaise = player.bet - this.currentBet;
-          this.currentBet = player.bet;
-          this.roundInitiator = playerIndex;
+          const raiseIncrement = player.bet - this.currentBet;
+          if (raiseIncrement >= this.minRaise) {
+            // Full raise all-in: reopen betting
+            this.minRaise = raiseIncrement;
+            this.currentBet = player.bet;
+            this.roundInitiator = playerIndex;
+            reopenedBetting = true;
+          } else {
+            // Short all-in: update currentBet but do NOT reopen betting
+            this.currentBet = player.bet;
+            // roundInitiator stays — others who already acted cannot re-raise
+          }
         }
+        // If player.bet <= currentBet, it's just an all-in call
         this._log(`${player.name} 全下 ${allInAmount}`);
         this.lastAction = { player: player.name, action: '全下', amount: allInAmount };
+        this._markPlayerActed(userId, reopenedBetting);
         break;
       }
 
@@ -555,11 +647,11 @@ class GameEngine {
       },
     });
 
-    // Check if only one player remains
-    const activePlayers = this.players.filter(p => p.isActive && !p.folded && this._isPlayerConnected(p));
-    if (activePlayers.length <= 1) {
-      if (activePlayers.length === 1) {
-        this._winByFold(activePlayers[0]);
+    // Check if only one player remains (include disconnected non-folded players)
+    const remainingPlayers = this.players.filter(p => p.isActive && !p.folded);
+    if (remainingPlayers.length <= 1) {
+      if (remainingPlayers.length === 1) {
+        this._winByFold(remainingPlayers[0]);
       } else {
          this.phase = 'FINISHED';
       }
@@ -573,6 +665,34 @@ class GameEngine {
   }
 
   _advanceTurn() {
+    // First: check if any player still needs to match the current bet.
+    // This is critical for the short all-in scenario: when a short all-in
+    // raises currentBet without reopening betting (roundInitiator unchanged),
+    // other players must still get a chance to call the difference.
+    const needAction = this.players.filter(p =>
+      this._canPlayerAct(p) && !p.folded && !p.allIn && p.bet < this.currentBet
+    );
+    const canAct = this.players.filter(p =>
+      this._canPlayerAct(p) && !p.folded && !p.allIn
+    );
+
+    // If someone still owes chips, find the next one and give them a turn.
+    if (needAction.length > 0) {
+      // Find next player who needs action, starting after current
+      let idx = (this.currentPlayerIndex + 1) % this.players.length;
+      let count = 0;
+      while (count < this.players.length) {
+        const p = this.players[idx];
+        if (this._canPlayerAct(p) && !p.folded && !p.allIn && p.bet < this.currentBet) {
+          this.currentPlayerIndex = idx;
+          this.startTurnTimer();
+          return;
+        }
+        idx = (idx + 1) % this.players.length;
+        count++;
+      }
+    }
+
     let next = this._nextActiveBettingPlayer(this.currentPlayerIndex);
 
     // Check if round is complete
@@ -581,10 +701,7 @@ class GameEngine {
       return;
     }
 
-    // Check if all non-folded players have matched the bet or are all-in
-    const needAction = this.players.filter(p => this._canPlayerAct(p) && !p.folded && !p.allIn && p.bet < this.currentBet);
-    const canAct = this.players.filter(p => this._canPlayerAct(p) && !p.folded && !p.allIn);
-
+    // Everyone matched or is all-in, and at most 1 can still act
     if (needAction.length === 0 && canAct.length <= 1 && this._hasEveryoneActed()) {
       this._advancePhase();
       return;
@@ -638,6 +755,7 @@ class GameEngine {
     }
     this.currentBet = 0;
     this.minRaise = this.bigBlind;
+    this.actedSinceLastFullRaise.clear();
 
     switch (this.phase) {
       case 'PRE_FLOP':
@@ -694,7 +812,9 @@ class GameEngine {
 
   _showdown() {
     this.phase = 'SHOWDOWN';
-    const activePlayers = this.players.filter(p => p.isActive && !p.folded && this._isPlayerConnected(p));
+    // Include ALL non-folded active players, even if disconnected
+    // (e.g. a disconnected all-in player still has rights to the pot)
+    const activePlayers = this.players.filter(p => p.isActive && !p.folded);
 
     const results = [];
     for (const p of activePlayers) {
@@ -772,40 +892,51 @@ class GameEngine {
   _calculateSidePots() {
     this.sidePots = [];
     
-    // 获取所有未弃牌的活跃玩家，按totalBet排序
-    const activePlayers = this.players
-      .filter(p => p.isActive && !p.folded)
+    // ALL players who contributed chips, INCLUDING folded players.
+    // Folded players' money stays in pools; they just can't WIN them.
+    const allContributors = this.players
+      .filter(p => p.isActive && p.totalBet > 0)
       .map(p => ({ ...p }))
       .sort((a, b) => a.totalBet - b.totalBet);
     
-    if (activePlayers.length === 0) return;
+    // Non-folded players determine eligibility to WIN each pool
+    const nonFoldedIds = new Set(
+      this.players.filter(p => p.isActive && !p.folded).map(p => p.id)
+    );
+    
+    if (allContributors.length === 0) return;
     
     let processedBet = 0;
     
-    for (let i = 0; i < activePlayers.length; i++) {
-      const player = activePlayers[i];
-      const currentBet = player.totalBet;
+    // Build pools at each distinct bet level
+    const betLevels = [...new Set(allContributors.map(p => p.totalBet))].sort((a, b) => a - b);
+    
+    for (const level of betLevels) {
+      if (level <= processedBet) continue;
       
-      if (currentBet <= processedBet) continue;
+      const betDiff = level - processedBet;
+      // Count ALL contributors at or above this level (including folded)
+      const contributorsAtLevel = allContributors.filter(p => p.totalBet >= level);
+      const potAmount = betDiff * contributorsAtLevel.length;
       
-      const betDiff = currentBet - processedBet;
-      // 所有有资格参与这个边池的玩家（下注 >= currentBet 的玩家）
-      const eligiblePlayers = activePlayers.filter(p => p.totalBet >= currentBet);
-      const potAmount = betDiff * eligiblePlayers.length;
+      // Only non-folded players can WIN from the pot
+      const eligibleWinnerIds = contributorsAtLevel
+        .filter(p => nonFoldedIds.has(p.id))
+        .map(p => p.id);
       
       this.sidePots.push({
         amount: potAmount,
-        eligiblePlayerIds: eligiblePlayers.map(p => p.id),
-        betLevel: currentBet
+        eligiblePlayerIds: eligibleWinnerIds,
+        betLevel: level
       });
       
-      processedBet = currentBet;
+      processedBet = level;
     }
     
-    // 验证总池是否正确
+    // Verify total matches pot
     const totalSidePots = this.sidePots.reduce((sum, sp) => sum + sp.amount, 0);
     if (totalSidePots !== this.pot) {
-      console.warn(`[Engine] Side pot calculation mismatch: ${totalSidePots} vs ${this.pot}`);
+      this._log(`[警告] 边池计算不匹配: ${totalSidePots} vs ${this.pot}`);
     }
   }
 
@@ -1088,7 +1219,7 @@ class GameEngine {
       actions.push('call');
     }
 
-    if (player.chips > callAmount) {
+    if (this._canPlayerRaise(playerIdx)) {
       actions.push('raise');
     }
 

@@ -15,13 +15,63 @@ jest.mock('../game/engine', () => {
       this.spectators = [];
       this.phase = 'WAITING';
       this.config = config;
+      this.readyForNext = new Set();
+    }
+    createGame(users) {
+      this.players = users.map((user) => ({
+        id: user.id,
+        name: user.name || user.username,
+        chips: user.chips || 0,
+        connectionState: 'online',
+        folded: false,
+      }));
+      this.phase = this.players.length >= 2 ? 'PRE_FLOP' : 'WAITING';
     }
     // methods used by LobbyManager (no‑ops for tests)
-    addPlayer() {}
-    addSpectator() {}
-    markPlayerRemoved() {}
+    addPlayer(user) {
+      this.players.push({
+        id: user.id,
+        name: user.name || user.username,
+        chips: user.chips || 0,
+        connectionState: 'online',
+        folded: false,
+      });
+      return true;
+    }
+    addSpectator(userId) {
+      if (!this.spectators.includes(userId)) this.spectators.push(userId);
+    }
+    removeSpectator(userId) {
+      this.spectators = this.spectators.filter((id) => id !== userId);
+    }
+    markPlayerRemoved(userId) {
+      const player = this.players.find((p) => p.id === userId);
+      if (player) player.connectionState = 'removed';
+      return true;
+    }
+    removePlayer(userId) {
+      return this.markPlayerRemoved(userId);
+    }
+    cleanupRemovedPlayers() {
+      this.players = this.players.filter((p) => p.connectionState !== 'removed');
+    }
     startReadyTimer() {}
-    handleReconnect() { return true; }
+    handleReconnect(userId) {
+      const player = this.players.find((p) => p.id === userId);
+      if (!player) return false;
+      player.connectionState = 'online';
+      return true;
+    }
+    handleDisconnect(userId) {
+      const player = this.players.find((p) => p.id === userId);
+      if (player) player.connectionState = 'disconnected';
+      return true;
+    }
+    setOnTimeoutCallback() {}
+    setOnReadyTimeoutCallback() {}
+    setOnDisconnectTimeoutCallback() {}
+    setOnEventCallback() {}
+    getState() { return {}; }
   };
 });
 
@@ -58,7 +108,14 @@ describe('LobbyManager – room cleanup (TDD)', () => {
     const user = { id: 1, username: 'alice' };
     // Simulate a room with no other players or spectators
     const roomId = 'room_empty';
-    const engine = { players: [], spectators: [] };
+    const engine = { 
+      players: [], 
+      spectators: [],
+      readyForNext: new Set(),
+      markPlayerRemoved: jest.fn(),
+      removePlayer: jest.fn(),
+      cleanupRemovedPlayers: jest.fn()
+    };
     lobby.activeGames.set(roomId, {
       engine,
       players: [],
@@ -89,6 +146,10 @@ describe('LobbyManager – room cleanup (TDD)', () => {
         { id: 3, connectionState: 'online', chips: 100, name: 'carol' },
       ],
       phase: 'PRE_FLOP',
+      readyForNext: new Set(),
+      markPlayerRemoved: jest.fn(),
+      removePlayer: jest.fn(),
+      cleanupRemovedPlayers: jest.fn()
     };
     // After timeout, we simulate that only one player remains active (playerId will be removed)
     engine.players[0].connectionState = 'removed'; // simulate removal inside timeout handling
@@ -109,5 +170,32 @@ describe('LobbyManager – room cleanup (TDD)', () => {
     expect(lobby.activeGames.has(roomId)).toBe(false);
     expect(lobby.tables.has(roomId)).toBe(false);
     expect(logger.info).toHaveBeenCalledWith('lobby.room_removed', { roomId, reason: 'empty' });
+  });
+
+  test('_createRoomWithPlayers exposes room.players and onDisconnect no longer crashes', () => {
+    const roomId = lobby._createRoomWithPlayers(
+      [
+        { id: 1, username: 'alice', chips: 100 },
+        { id: 2, username: 'bob', chips: 100 },
+      ],
+      'medium',
+      { smallBlind: 10, bigBlind: 20 },
+      null
+    );
+
+    const room = lobby.getRoom(roomId);
+    expect(room.players).toBe(room.engine.players);
+    room.engine.phase = 'WAITING';
+    expect(lobby._findOpenPlayerRoom('medium')).not.toBeNull();
+
+    lobby.connectedUsers.set('sock1', {
+      user: { id: 1, username: 'alice' },
+      socket: createMockSocket(),
+      roomId,
+      isSpectator: false,
+    });
+
+    expect(() => lobby.onDisconnect('sock1')).not.toThrow();
+    expect(room.engine.players.find((p) => p.id === 1).connectionState).toBe('disconnected');
   });
 });

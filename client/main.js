@@ -3,7 +3,6 @@
 // ============================================================
 
 import { walletConnector } from './wallet.js';
-import { renderTables } from './tableThumbnails.js';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 
@@ -363,15 +362,6 @@ function showLobby() {
   els.queueStatus.classList.add('hidden');
 }
 
-function joinSpecificTable(tableId) {
-  socket.emit('lobby:join_specific', { tableId });
-}
-
-function joinRandomTable() {
-  const stakeLevel = document.querySelector('.stake-option.active')?.dataset.level || 'medium';
-  socket.emit('lobby:join_random', { stakeLevel });
-}
-
 function showGame() {
   els.loginScreen.classList.add('hidden');
   els.lobbyScreen.classList.add('hidden');
@@ -436,12 +426,10 @@ function connectSocket() {
   } else {
     socket = io(socketOptions);
   }
-  window.socket = socket;
 
   socket.on('connect', () => {
     console.log('Connected to server');
     hideDisconnectOverlay();
-    socket.emit('lobby:get_tables');
   });
 
   socket.on('disconnect', (reason) => {
@@ -484,17 +472,6 @@ function connectSocket() {
   socket.on('lobby:stats', (data) => {
     els.lblOnlineCount.textContent = data.online;
     els.globalOnline.textContent = `在线: ${data.online}`;
-  });
-
-  socket.on('table:update', (tables) => {
-    renderTables(tables);
-  });
-
-  socket.on('lobby:joined', (data) => {
-    if (data.isSpectator) {
-      showNotification(data.message || '已加入观战', 'info');
-    }
-    showGame();
   });
 
   socket.on('lobby:queued', (data) => {
@@ -2045,8 +2022,6 @@ function setupEventListeners() {
       document.querySelectorAll('.stake-option').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       selectedStakeLevel = btn.dataset.level;
-      // Refresh tables list when stake level changes
-      if (socket) socket.emit('lobby:get_tables');
     });
   });
 
@@ -2054,36 +2029,9 @@ function setupEventListeners() {
     if (socket) socket.emit('lobby:join', { stakeLevel: selectedStakeLevel });
   });
 
-  const btnRefreshTables = document.getElementById('btn-refresh-tables');
-  if (btnRefreshTables) {
-    btnRefreshTables.addEventListener('click', () => {
-      if (socket) socket.emit('lobby:get_tables');
-    });
-  }
-
   els.btnCancelMatch.addEventListener('click', () => {
     if (socket) socket.emit('lobby:leave');
   });
-
-  const btnLeaveTable = document.getElementById('btn-leave-table');
-  if (btnLeaveTable) {
-    btnLeaveTable.addEventListener('click', () => {
-      if (socket) {
-        socket.emit('game:leave');
-      }
-    });
-  }
-
-  const btnQuitGame = document.getElementById('btn-quit-game');
-  if (btnQuitGame) {
-    btnQuitGame.addEventListener('click', () => {
-      if (socket) {
-        socket.emit('lobby:quit');
-        socket.disconnect();
-      }
-      logout();
-    });
-  }
 
   els.historyToggle.addEventListener('click', () => {
     els.historyPanel.classList.remove('hidden');
