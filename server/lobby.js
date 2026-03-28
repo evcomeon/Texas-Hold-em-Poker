@@ -80,8 +80,6 @@ class LobbyManager {
       this.waitingQueue.set(level, []);
     }
 
-    // 可选注入：Bot 插件（不 require bots 模块，由上层注入）
-    this.getFillBotsProvider = null;
   }
 
   _updateTableInfo(roomId) {
@@ -118,6 +116,16 @@ class LobbyManager {
       }
     }
     return matches;
+  }
+
+  findActiveRoomSessionByUserId(userId, excludedSocketId = null) {
+    for (const [socketId, data] of this.connectedUsers.entries()) {
+      if (socketId === excludedSocketId) continue;
+      if (data.user.id === userId && data.roomId) {
+        return [socketId, data];
+      }
+    }
+    return null;
   }
 
   _isUserQueued(userId) {
@@ -161,14 +169,6 @@ class LobbyManager {
     this.broadcastDelegate = delegate;
   }
 
-  setFillBotsProvider(provider) {
-    this.getFillBotsProvider = provider;
-  }
-
-  setGetPlayerChips(provider) {
-    this.getPlayerChips = provider;
-  }
-
   onDisconnect(socketId) {
     const data = this.connectedUsers.get(socketId);
     if (!data) return null;
@@ -194,8 +194,14 @@ class LobbyManager {
             this._broadcastToRoom(data.roomId, room);
           }
         }
-        this._updateTableInfo(data.roomId);
-        this.emitTablesUpdate();
+
+        const remainingPlayers = room.engine.players.filter((p) => p.connectionState !== 'removed');
+        if (remainingPlayers.length === 0 && room.spectators.length === 0) {
+          this._maybeDeleteRoom(data.roomId, 'empty');
+        } else {
+          this._updateTableInfo(data.roomId);
+          this.emitTablesUpdate();
+        }
       }
     }
     
@@ -231,8 +237,7 @@ class LobbyManager {
     try {
       // 检查是否已经在某个房间中，避免同账号重复进桌把自己复制到牌局里
       const findStart = Date.now();
-      const existingEntries = this._findUserEntriesById(user.id).filter(([socketId]) => socketId !== socket.id);
-      const activeRoomEntry = existingEntries.find(([, data]) => data.roomId);
+      const activeRoomEntry = this.findActiveRoomSessionByUserId(user.id, socket.id);
       logger.info('lobby.find_user_data', { userId: user.id, elapsedMs: Date.now() - findStart });
 
       if (activeRoomEntry) {
@@ -421,8 +426,6 @@ class LobbyManager {
   _checkQueue(roomIdRefCb, stakeLevel = 'medium') {
     const checkStart = Date.now();
     let queue = this.waitingQueue.get(stakeLevel);
-    const stakeConfig = this.STAKE_LEVELS[stakeLevel];
-    
     logger.info('lobby.check_queue', {
       stakeLevel,
       queueLength: queue.length,
@@ -479,8 +482,7 @@ class LobbyManager {
       logger.info('lobby.fill_room', { roomId, playerId: player.id, elapsedMs: Date.now() - fillStart });
     }
 
-    // 2. 当人数还不够开新桌时，优先挂到现有进行中的同级别桌子观战，
-    // 这样后来的真人不会再被立刻拆去新开的 Bot 房。
+    // 2. 当人数还不够开新桌时，优先挂到现有进行中的同级别桌子观战。
     while (queue.length > 0 && queue.length < this.MIN_PLAYERS) {
       const spectatorRoomEntry = this._findSpectatorRoom(stakeLevel);
       if (!spectatorRoomEntry) break;
@@ -492,27 +494,16 @@ class LobbyManager {
       this._assignSpectatorToRoom(roomId, room, spectator, roomIdRefCb);
     }
 
-    // 3. 有足够真人时优先开真人桌；只有没有可挂观战的房间时，才会为零散真人补 Bot 开桌。
-    while (queue.length >= this.MIN_PLAYERS || (queue.length > 0 && !this._findSpectatorRoom(stakeLevel))) {
+    // 3. 只有凑够最少真人数才开新桌，陪玩机器人由外部脚本自行进入匹配队列。
+    while (queue.length >= this.MIN_PLAYERS) {
       const createStart = Date.now();
-      const humanCount = Math.min(queue.length, this.MAX_PLAYERS);
-      const players = queue.splice(0, humanCount);
+      const players = queue.splice(0, Math.min(queue.length, this.MAX_PLAYERS));
       if (players.length === 0) break;
-
-      const fillBots = this.getFillBotsProvider ? this.getFillBotsProvider(players.length, stakeConfig) : [];
-      const allPlayers = [...players, ...fillBots];
-      if (allPlayers.length < this.MIN_PLAYERS) {
-        queue.unshift(...players);
-        break;
-      }
-
-      const roomId = this._createRoomWithPlayers(allPlayers, stakeLevel, stakeConfig, roomIdRefCb);
+      const roomId = this._createRoomWithPlayers(players, stakeLevel, this.STAKE_LEVELS[stakeLevel], roomIdRefCb);
       logger.info('lobby.room_created', {
         roomId,
         stakeLevel,
-        playerCount: allPlayers.length,
-        humanCount: players.length,
-        botCount: fillBots.length,
+        playerCount: players.length,
         elapsedMs: Date.now() - createStart,
       });
     }
@@ -720,6 +711,23 @@ class LobbyManager {
       return { restored: false, reason: 'room_not_found' };
     }
 
+    // 首先检查是否是断线玩家
+    const existingPlayer = room.engine.players.find(p => p.id === user.id);
+    if (existingPlayer && existingPlayer.connectionState === 'disconnected') {
+      // 恢复断线玩家
+      existingPlayer.disconnected = false;
+      existingPlayer.connectionState = 'online';
+      room.engine.clearDisconnectTimer(user.id);
+      
+      // 更新 connectedUsers 中的 isSpectator 状态
+      this.connectedUsers.get(socket.id).isSpectator = false;
+      
+      // 从 spectators 中移除（如果存在）
+      room.spectators = room.spectators.filter(id => id !== user.id);
+      
+      return { restored: true, room };
+    }
+
     if (isSpectator) {
       if (!room.spectators.includes(user.id)) {
         room.spectators.push(user.id);
@@ -752,26 +760,19 @@ class LobbyManager {
     const bustedPlayers = [];
     const activePlayers = [];
     for (const player of room.players) {
-      const memChips = this.getPlayerChips ? this.getPlayerChips(player) : null;
-      if (memChips !== null) {
-        player.chips = memChips;
-      } else {
-        try {
-          const dbUser = await UserModel.findById(player.id);
-          if (dbUser) {
-            player.chips = dbUser.chips_balance;
-          }
-        } catch (e) {
-          logger.error('lobby.fetch_player_chips_failed', { roomId, userId: player.id, error: e });
+      try {
+        const dbUser = await UserModel.findById(player.id);
+        if (dbUser) {
+          player.chips = dbUser.chips_balance;
         }
+      } catch (e) {
+        logger.error('lobby.fetch_player_chips_failed', { roomId, userId: player.id, error: e });
       }
 
       if (player.chips < minChips && player.connectionState !== 'removed') {
         bustedPlayers.push(player);
         room.engine.markPlayerRemoved(player.id, 'busted');
-        if (typeof player.id !== 'number' || player.id >= 0) {
-          room.engine.addSpectator(player.id);
-        }
+        room.engine.addSpectator(player.id);
         
         for (const [sId, data] of this.connectedUsers.entries()) {
           if (data.user.id === player.id) {
@@ -793,27 +794,17 @@ class LobbyManager {
     }
     
     for (const busted of bustedPlayers) {
-      if (typeof busted.id === 'number' && busted.id < 0) {
-        // Bot 爆仓后直接退出，不进入观战列表
-        continue;
-      }
       if (!room.spectators.includes(busted.id)) {
         room.spectators.push(busted.id);
       }
     }
 
-    const bustedBotIds = bustedPlayers
-      .filter((player) => typeof player.id === 'number' && player.id < 0)
-      .map((player) => player.id);
-    if (bustedBotIds.length > 0) {
-      // Bot 账号直接离桌，避免继续占用房间玩家位
-      room.players = room.players.filter((player) => !bustedBotIds.includes(player.id));
-    }
-    
+    room.engine.cleanupRemovedPlayers();
+
     // 2. 将有足够筹码的观战者转为玩家（如果还有空位）
     const stillSpectators = [];
     this._log(`处理观战者: ${room.spectators.length} 人, 当前玩家: ${room.players.length}/${this.MAX_PLAYERS}`);
-    
+
     while (room.spectators.length > 0 && room.players.length < this.MAX_PLAYERS) {
       const specId = room.spectators.shift();
       room.engine.removeSpectator(specId);
@@ -838,16 +829,18 @@ class LobbyManager {
           const added = room.engine.addPlayer(specUser);
           if (added) {
             this._log(`观战者 ${specId} 转为玩家`);
-          } else {
-            stillSpectators.push(specId);
-            room.engine.addSpectator(specId);
-          }
-          
-          // 更新状态
-          if (added) {
             for (const [sId, data] of this.connectedUsers.entries()) {
               if (data.user.id === specId) {
                 data.isSpectator = false;
+                break;
+              }
+            }
+          } else {
+            stillSpectators.push(specId);
+            room.engine.addSpectator(specId);
+            for (const [sId, data] of this.connectedUsers.entries()) {
+              if (data.user.id === specId) {
+                data.isSpectator = true;
                 break;
               }
             }
@@ -856,6 +849,13 @@ class LobbyManager {
           // 筹码不足，继续作为观战者
           stillSpectators.push(specId);
           room.engine.addSpectator(specId);
+          
+          for (const [sId, data] of this.connectedUsers.entries()) {
+            if (data.user.id === specId) {
+              data.isSpectator = true;
+              break;
+            }
+          }
           
           // 通知该玩家筹码不足
           const specSocket = this.getSocketByUserId(specId);
@@ -877,9 +877,11 @@ class LobbyManager {
     const activePlayerCount = room.players.filter(p => p.connectionState !== 'removed').length;
     if (activePlayerCount < 2) {
       this._log(`玩家不足 (${activePlayerCount}/2)，无法继续游戏`);
+      this._syncTableInfo(roomId);
       return { canStart: false, playerCount: activePlayerCount };
     }
     
+    this._syncTableInfo(roomId);
     return { canStart: true, playerCount: activePlayerCount };
   }
   

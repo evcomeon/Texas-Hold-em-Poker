@@ -28,7 +28,7 @@ function persistGameActionLog(payload) {
   });
 }
 
-function createSaveChipsToDatabase(shouldSkipChipsSave) {
+function createSaveChipsToDatabase() {
   return async function saveChipsToDatabase(room) {
     if (!room || !room.engine) return;
     
@@ -36,7 +36,6 @@ function createSaveChipsToDatabase(shouldSkipChipsSave) {
     if (engine.phase !== 'SHOWDOWN') return;
     
     for (const player of engine.players) {
-      if (shouldSkipChipsSave?.(player)) continue;
       try {
         await UserModel.updateChips(player.id, player.chips);
       } catch (e) {
@@ -46,9 +45,8 @@ function createSaveChipsToDatabase(shouldSkipChipsSave) {
   };
 }
 
-function configureSockets(server, opts = {}) {
-  const { fillBotsProvider, getPlayerChips, onAfterBroadcast, shouldSkipChipsSave } = opts;
-  const saveChipsToDatabase = createSaveChipsToDatabase(shouldSkipChipsSave);
+function configureSockets(server) {
+  const saveChipsToDatabase = createSaveChipsToDatabase();
 
   const corsOrigins = process.env.CORS_ORIGINS 
     ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
@@ -64,8 +62,6 @@ function configureSockets(server, opts = {}) {
 
   const lobby = new LobbyManager();
   lobby.io = io;
-  if (fillBotsProvider) lobby.setFillBotsProvider(fillBotsProvider);
-  if (getPlayerChips) lobby.setGetPlayerChips(getPlayerChips);
 
   // Middleware for authentication
   io.use(async (socket, next) => {
@@ -275,10 +271,6 @@ function configureSockets(server, opts = {}) {
       lobby.leaveQueue(socket.user.id);
 
       const currentData = lobby.connectedUsers.get(socket.id);
-      if (currentData?.roomId && currentData.roomId !== tableId) {
-        lobby.leaveGame(socket.id);
-      }
-
       const room = lobby.getRoom(tableId);
       if (!room) {
         socket.emit('lobby:error', { error: '牌桌不存在或已关闭' });
@@ -291,8 +283,48 @@ function configureSockets(server, opts = {}) {
         return;
       }
 
+      const activeRoomSession = lobby.findActiveRoomSessionByUserId(socket.user.id, socket.id);
+      if (activeRoomSession) {
+        socket.emit('lobby:error', {
+          error: '该账号已在牌桌中，请先返回原牌桌或断开其他会话',
+          roomId: activeRoomSession[1].roomId,
+        });
+        return;
+      }
+
+      if (currentData?.roomId && currentData.roomId !== tableId) {
+        lobby.leaveGame(socket.id);
+      }
+
       const playerCount = room.players.filter((player) => player.connectionState !== 'removed').length;
       const inProgress = room.engine.phase !== 'WAITING' && room.engine.phase !== 'FINISHED';
+      
+      // 检查是否是断线重连的玩家
+      const existingPlayer = room.engine.players.find(p => p.id === socket.user.id);
+      const isDisconnectedPlayer = existingPlayer && existingPlayer.connectionState === 'disconnected';
+      
+      // 如果是断线玩家，直接恢复
+      if (isDisconnectedPlayer) {
+        existingPlayer.disconnected = false;
+        existingPlayer.connectionState = 'online';
+        room.engine.clearDisconnectTimer(socket.user.id);
+        
+        if (userData) {
+          userData.roomId = tableId;
+          userData.isSpectator = false;
+          userData.stakeLevel = room.stakeLevel;
+        }
+        
+        socket.join(tableId);
+        socket.emit('game:reconnected', { roomId: tableId, message: '已重新连接到游戏' });
+        socket.emit('game:state', room.engine.getState(socket.user.id));
+        
+        lobby._updateTableInfo(tableId);
+        lobby.emitTablesUpdate();
+        await broadcastToRoom(io, tableId, room, lobby);
+        return;
+      }
+      
       const isSpectator = inProgress;
 
       if (!isSpectator && playerCount >= room.maxPlayers) {
@@ -397,7 +429,11 @@ function configureSockets(server, opts = {}) {
     socket.on('game:action', async ({ action, amount }) => {
       const data = lobby.connectedUsers.get(socket.id);
       if (!data || !data.roomId) return;
-      
+      if (data.isSpectator) {
+        socket.emit('game:error', { error: '观战者不能操作' });
+        return;
+      }
+
       const roomId = data.roomId;
       const room = lobby.activeGames.get(roomId);
       if (!room) return;
@@ -445,13 +481,22 @@ function configureSockets(server, opts = {}) {
       if (!data || !data.roomId) {
         return;
       }
-      
+      if (data.isSpectator) {
+        socket.emit('game:error', { error: '观战者不能准备下一手' });
+        return;
+      }
+
       const roomId = data.roomId;
       const room = lobby.activeGames.get(roomId);
       if (!room) return;
 
       const engine = room.engine;
       const result = engine.playerRequestedNextHand(socket.user.id);
+      if (result.error) {
+        socket.emit('game:error', result);
+        return;
+      }
+
       persistGameActionLog({
         roomId,
         handNumber: engine.handNumber,
@@ -498,6 +543,9 @@ function configureSockets(server, opts = {}) {
         
         // 开始新一手牌
         engine.nextHand();
+        
+        // 同步桌子信息
+        lobby._syncTableInfo(roomId);
         
         // 广播新状态
         await broadcastToRoom(io, roomId, room, lobby);
@@ -634,25 +682,6 @@ function configureSockets(server, opts = {}) {
       }
     }
 
-    if (eventName === 'game:state' && onAfterBroadcast) {
-      const broadcast = () => broadcastToRoom(io, roomId, room, lobby);
-      const handleAllReady = async () => {
-        const stakeConfig = lobby.getStakeLevels()[room.stakeLevel || 'medium'];
-        const matchResult = await lobby.startNewHandWithSpectators(roomId, stakeConfig);
-        if (!matchResult?.canStart) {
-          room.engine.phase = 'FINISHED';
-          await broadcastToRoom(io, roomId, room, lobby, 'game:notification', {
-            msg: '玩家不足，游戏结束。请充值后继续游戏。',
-          });
-          await broadcastToRoom(io, roomId, room, lobby);
-          return;
-        }
-        room.chipsSaved = false;
-        room.engine.nextHand();
-        await broadcastToRoom(io, roomId, room, lobby);
-      };
-      await onAfterBroadcast(io, roomId, room, lobby, { broadcast, handleAllReady });
-    }
   }
 
   lobby.setBroadcastDelegate((roomId, room) => broadcastToRoom(io, roomId, room, lobby));
@@ -667,7 +696,7 @@ function configureSockets(server, opts = {}) {
     return null;
   }
 
-  return io;
+  return { io, lobby };
 }
 
 module.exports = configureSockets;
